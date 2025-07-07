@@ -267,3 +267,46 @@ class SinePositionalEncoding3D(SinePositionalEncoding):
             dim=5).view(B, T, H, W, -1)
         pos = (torch.cat((pos_y, pos_x), dim=4) + pos_z).permute(0, 1, 4, 2, 3)
         return pos
+
+
+@MODELS.register_module()
+class SinePositionalEncoding1D(BaseModule):
+    def __init__(
+        self,
+        num_feats,  # this is actually embed_dims // 2
+        temperature=10000,
+        normalize=False,
+        scale=2 * math.pi,
+        offset=0.0
+    ):
+        super().__init__()
+        self.num_feats = num_feats
+        self.temperature = temperature
+        self.normalize = normalize
+        self.scale = scale
+        self.offset = offset
+
+    def forward(self, mask: Optional[Tensor] = None, input: Optional[Tensor] = None) -> Tensor:
+        if mask is not None:
+            bs, num_tokens = mask.shape
+        elif input is not None:
+            bs, num_tokens, _ = input.shape
+        else:
+            raise ValueError("Either mask or input must be provided")
+
+        device = input.device if input is not None else mask.device
+        pos = torch.arange(num_tokens, dtype=torch.float32, device=device).unsqueeze(0).repeat(bs, 1)
+
+        if self.normalize:
+            pos = pos / (num_tokens - 1 + 1e-6) * self.scale
+            pos = pos + self.offset
+
+        dim_t = torch.arange(self.num_feats, dtype=torch.float32, device=device)
+        dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_feats)
+
+        pos = pos[:, :, None] / dim_t  # [bs, num_tokens, num_feats]
+        pos_sin = pos.sin()
+        pos_cos = pos.cos()
+        pos = torch.cat([pos_sin, pos_cos], dim=2)  # [bs, num_tokens, 2 * num_feats]
+
+        return pos

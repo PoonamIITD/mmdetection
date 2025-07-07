@@ -2,7 +2,7 @@
 import copy
 import re
 import warnings
-from typing import Dict, Optional, Tuple, Union, Any
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -42,7 +42,7 @@ def chunks(lst: list, n: int) -> list:
 
 
 @MODELS.register_module()
-class GroundingDINO(DINO):
+class GroundingDINOWithDETRBackbone(DINO):
     """Implementation of `Grounding DINO: Marrying DINO with Grounded Pre-
     Training for Open-Set Object Detection.
 
@@ -52,16 +52,12 @@ class GroundingDINO(DINO):
     <https://github.com/IDEA-Research/GroundingDINO>`_.
     """
 
-    def __init__(self, 
-                def_detr,
-                topk_prompts,
-                language_model,
-                *args,
-                use_autocast=False,
-                **kwargs) -> None:
+    def __init__(self,
+                 language_model,
+                 *args,
+                 use_autocast=False,
+                 **kwargs) -> None:
 
-        self.def_detr_cfg = def_detr
-        self.topk_prompts = topk_prompts
         self.language_model_cfg = language_model
         self._special_tokens = '. '
         self.use_autocast = use_autocast
@@ -69,9 +65,8 @@ class GroundingDINO(DINO):
 
     def _init_layers(self) -> None:
         """Initialize layers except for backbone, neck and bbox_head."""
-        # self.positional_encoding = SinePositionalEncoding(
-        #     **self.positional_encoding)
-        self.positional_encoding = MODELS.build(self.positional_encoding)
+        self.positional_encoding = SinePositionalEncoding(
+            **self.positional_encoding)
         self.encoder = GroundingDinoTransformerEncoder(**self.encoder)
         self.decoder = GroundingDinoTransformerDecoder(**self.decoder)
         self.embed_dims = self.encoder.embed_dims
@@ -85,10 +80,6 @@ class GroundingDINO(DINO):
             torch.Tensor(self.num_feature_levels, self.embed_dims))
         self.memory_trans_fc = nn.Linear(self.embed_dims, self.embed_dims)
         self.memory_trans_norm = nn.LayerNorm(self.embed_dims)
-
-        self.def_detr = MODELS.build(self.def_detr_cfg)
-        self.region_prompt = nn.Parameter(torch.zeros(1, self.topk_prompts, self.embed_dims))  # [1, num_crops, C], # Idea similar to CORA 
-        nn.init.xavier_uniform_(self.region_prompt)  # optional initialization
 
         # text modules
         self.language_model = MODELS.build(self.language_model_cfg)
@@ -314,19 +305,10 @@ class GroundingDINO(DINO):
         img_feats: Tuple[Tensor],
         text_dict: Dict,
         batch_data_samples: OptSampleList = None,
-        crops_per_image: Optional[Any] = None,
     ) -> Dict:
-        # encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer_flattened(
-        #     img_feats, batch_data_samples)
+        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
+            img_feats, batch_data_samples)
 
-        # mlvl_feats_with_dummy = list(img_feats) + [img_feats[-1]]  # Now 5 levels
-        # encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
-        #     mlvl_feats_with_dummy, batch_data_samples)
-        
-
-        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer_with_crops(
-            img_feats, crops_per_image, batch_data_samples)
-        
         encoder_outputs_dict = self.forward_encoder(
             **encoder_inputs_dict, text_dict=text_dict)
 
@@ -433,92 +415,34 @@ class GroundingDINO(DINO):
         head_inputs_dict['memory_text'] = memory_text
         head_inputs_dict['text_token_mask'] = text_token_mask
         return decoder_inputs_dict, head_inputs_dict
-    
-    def forward_features(self, batch_inputs, batch_data_samples):
+
+    def forward_features(self, batch_inputs, batch_data_samples=None):
         """
-        Extracts decoder outputs, bounding box predictions, and classification scores
-        from the Deformable DETR inside Grounding DINO.
+        Extracts decoder outputs from Deformable DETR.
 
         Args:
             batch_inputs (Tensor or tuple): Input image tensor or pre-extracted features.
             batch_data_samples (List[DetDataSample], optional): Metadata for the batch.
 
         Returns:
-            dict: {
-                'decoder_intermediate': List of decoder layer outputs (each: [bs, num_queries, dim]),
-                'bbox_preds': Tensor of shape [bs, num_queries, 4],
-                'cls_scores': Tensor of shape [bs, num_queries, num_classes]
-            }
+            dict: {'decoder_intermediate': List of decoder outputs (each Tensor: [bs, num_queries, dim])}
         """
-        # Step 1: Extract features from backbone + neck
-        img_feats = self.def_detr.extract_feat(batch_inputs)
+        # Step 1: Extract features from raw images using backbone + neck, if needed
+        if isinstance(batch_inputs, torch.Tensor):
+            visual_feats = self.extract_feat(batch_inputs)
+        else:
+            visual_feats = batch_inputs  # Already extracted features
 
-        # Step 2: Transformer encoding/decoding
-        head_inputs_dict = self.def_detr.forward_transformer(img_feats, batch_data_samples)
+        # Step 2: Forward through transformer's full pipeline
+        outputs = self.forward_transformer(visual_feats, batch_data_samples)
 
-        # Step 3: Run bbox head to get predictions
-        hidden_states = head_inputs_dict['hidden_states']  # usually a list of decoder layer outputs
-        references = head_inputs_dict['references']      # reference points from the decoder
+        # Step 3: Extract decoder hidden states
+        decoder_layers = outputs.get("hidden_states", None)
 
-        # Forward through bbox head
-        outs = self.def_detr.bbox_head(hidden_states, references)
-
-        return outs   # class_scores- (bs, 300, num_classes) and  bbox_preds- (bs, 300, 4)  
-
-    def crop_raw_features_from_swin(self, outs,
-                                    visual_feat,  # [bs, C, H_feat, W_feat] from SWIN-T
-                                    img_metas,    # list of dicts with 'img_shape'
-                                    topk=300,
-                                    use_sigmoid=True,
-                                    num_classes=91):
-        cls_scores, bbox_preds = outs  # [num_layers, bs, num_queries, C], [num_layers, bs, num_queries, 4]
-        cls_scores = cls_scores[-1]    # last decoder layer
-        bbox_preds = bbox_preds[-1]    # [bs, num_queries, 4]
-
-        bs, C, H_feat, W_feat = visual_feat.shape
-        crops_per_image = []
-
-        for b in range(bs):
-            cls_score = cls_scores[b]  # [num_queries, num_classes]
-            boxes = bbox_preds[b]      # [num_queries, 4]
-
-            if use_sigmoid:
-                cls_prob = cls_score.sigmoid()
-                scores, indices = cls_prob.view(-1).topk(topk)
-                labels = indices % num_classes
-                query_inds = indices // num_classes
-            else:
-                probs = cls_score.softmax(-1)[..., :-1]
-                scores, labels = probs.max(-1)
-                scores, query_inds = scores.topk(topk)
-                labels = labels[query_inds]
-
-            # Get (cx, cy, w, h)
-            box_preds = boxes[query_inds]
-            cx, cy, w, h = box_preds.unbind(-1)
-
-            # Convert to (x1, y1, x2, y2) in normalized coords
-            x1 = (cx - 0.5 * w) * W_feat
-            y1 = (cy - 0.5 * h) * H_feat
-            x2 = (cx + 0.5 * w) * W_feat
-            y2 = (cy + 0.5 * h) * H_feat
-
-            x1 = x1.clamp(0, W_feat - 1).long()
-            y1 = y1.clamp(0, H_feat - 1).long()
-            x2 = x2.clamp(1, W_feat).long()
-            y2 = y2.clamp(1, H_feat).long()
-
-            # Crop raw features without resizing
-            image_feat = visual_feat[b]  # [C, H, W]
-            crops = []
-            for i in range(topk):
-                crop = image_feat[:, y1[i]:y2[i], x1[i]:x2[i]]  # [C, h_i, w_i]
-                crops.append(crop)
-
-            crops_per_image.append(crops)  # list of [topk tensors of shape [C, h, w]]
-
-        return crops_per_image  # list of length bs, each element is list of topk variable-sized crops
-
+        return {
+            "decoder_intermediate": list(decoder_layers) if decoder_layers is not None else []
+        }
+    
     def loss(self, batch_inputs: Tensor,
              batch_data_samples: SampleList) -> Union[dict, list]:
         text_prompts = [
@@ -595,30 +519,8 @@ class GroundingDINO(DINO):
         if self.use_autocast:
             with autocast(enabled=True):
                 visual_features = self.extract_feat(batch_inputs)
-                # visual_feats = self.forward_features(batch_inputs, batch_data_samples)
-                # hidden_states = visual_feats['hidden_states'] # [6, bs, 300, C]
-                # last_four = hidden_states[-4:]  # [3, bs, 300, C]
-                # # Reshape 300 queries → 15x20
-                # grid_h, grid_w = 15, 20
-                # B = last_four.shape[1]
-                # C = last_four.shape[-1]
-                # reshaped_feats = last_four.view(4, B, grid_h, grid_w, C).permute(0, 1, 4, 2, 3)  # [3, B, C, 15, 20]
-
-                # # Convert into list of 3 tensors
-                # visual_features = [reshaped_feats[i] for i in range(4)]  # each: [bs, C, 15, 20]
         else:
             visual_features = self.extract_feat(batch_inputs)
-            # visual_feats = self.forward_features(batch_inputs, batch_data_samples)
-            # hidden_states = visual_feats['hidden_states'] # [6, bs, 300, C]
-            # last_four = hidden_states[-4:]  # [3, bs, 300, C]
-            # # Reshape 300 queries → 15x20
-            # grid_h, grid_w = 15, 20
-            # B = last_four.shape[1]
-            # C = last_four.shape[-1]
-            # reshaped_feats = last_four.view(4, B, grid_h, grid_w, C).permute(0, 1, 4, 2, 3)  # [3, B, C, 15, 20]
-
-            # Convert into list of 3 tensors
-            # visual_features = [reshaped_feats[i] for i in range(4)]  # each: [bs, C, 15, 20]
         head_inputs_dict = self.forward_transformer(visual_features, text_dict,
                                                     batch_data_samples)
 
@@ -666,26 +568,7 @@ class GroundingDINO(DINO):
 
         # image feature extraction
         visual_feats = self.extract_feat(batch_inputs)
-        outs = self.forward_features(batch_inputs, batch_data_samples)
-        crops_per_image = self.crop_raw_features_from_swin(
-            outs=outs,
-            visual_feat=visual_feats[0],  # SWIN-T highest resolution
-            img_metas=[x.metainfo for x in batch_data_samples],
-            topk=self.topk_prompts,
-            use_sigmoid=True,
-            num_classes= self.bbox_head.cls_out_channels
-            )
-        # def_detr_cropped_feats = self.extract_crops(
-        #     swin_feat_map=visual_feats[0],      # highest-resolution SWIN-T feature
-        #     bbox_preds=def_detr_preds,
-        #     cls_scores=def_detr_class_scores,
-        #     top_k=50)
-        # hidden_states = visual_feats['hidden_states'] # [6, bs, 300, C]
-        # # Step 1: Take the last 4 layers
-        # last_4 = hidden_states[-4:]  # [4, bs, 300, C]
-        # # Step 2: Rearrange dimensions to [bs, 4, 300, C]
-        # visual_feats = last_4.permute(1, 0, 2, 3)  # [bs, 4, 300, C]
-        
+
         if isinstance(text_prompts[0], list):
             # chunked text prompts, only bs=1 is supported
             assert len(batch_inputs) == 1
@@ -707,9 +590,7 @@ class GroundingDINO(DINO):
                     0].token_positive_map = token_positive_maps_once
 
                 head_inputs_dict = self.forward_transformer(
-                    copy.deepcopy(visual_feats), text_dict, batch_data_samples, crops_per_image)
-                # head_inputs_dict = self.forward_transformer(
-                #     copy.deepcopy(visual_feats), text_dict, batch_data_samples)
+                    copy.deepcopy(visual_feats), text_dict, batch_data_samples)
                 pred_instances = self.bbox_head.predict(
                     **head_inputs_dict,
                     rescale=rescale,
@@ -738,9 +619,7 @@ class GroundingDINO(DINO):
                 data_samples.token_positive_map = token_positive_maps[i]
 
             head_inputs_dict = self.forward_transformer(
-                visual_feats, text_dict, batch_data_samples, crops_per_image)
-            # head_inputs_dict = self.forward_transformer(
-            #     visual_feats, text_dict, batch_data_samples)
+                visual_feats, text_dict, batch_data_samples)
             results_list = self.bbox_head.predict(
                 **head_inputs_dict,
                 rescale=rescale,

@@ -1,0 +1,99 @@
+{"filename": "train5500.jpg", 
+"height": 1080, 
+"width": 1920, 
+"detection": {"instances": [{"bbox": [1499.4287109375, 571.8432006835938, 1862.8057861328125, 1053.1231689453125], 
+"label": 2, "category": "rickshaw"}, {"bbox": [901.4893798828125, 580.1137084960938, 1013.2269897460938, 858.8182983398438], 
+"label": 1, "category": "person"}, {"bbox": [1217.8621826171875, 702.2913208007812, 1418.92626953125, 944.481201171875], 
+"label": 8, "category": "motorcycle"}, {"bbox": [1850.3251953125, 627.6378173828125, 1919.9892578125, 880.6907348632812], 
+"label": 2, "category": "rickshaw"}, {"bbox": [1235.5704345703125, 600.7950439453125, 1317.329833984375, 767.8244018554688], 
+"label": 1, "category": "person"}, {"bbox": [986.2377319335938, 619.4569702148438, 1049.1973876953125, 816.837158203125], 
+"label": 1, "category": "person"}, {"bbox": [403.7209167480469, 818.74560546875, 883.7627563476562, 1079.87646484375], 
+"label": 9, "category": "bicycle"}, {"bbox": [1404.5513916015625, 709.8675537109375, 1554.7288818359375, 911.133544921875], 
+"label": 8, "category": "motorcycle"}, {"bbox": [0.8035612106323242, 838.3088989257812, 458.09344482421875, 1079.62890625], 
+"label": 8, "category": "motorcycle"}, {"bbox": [0.0, 510.0132751464844, 435.03643798828125, 1079.2965087890625], 
+"label": 1, "category": "person"}, {"bbox": [491.4589538574219, 537.9569091796875, 770.521484375, 1078.7926025390625], 
+"label": 1, "category": "person"}, {"bbox": [1135.1551513671875, 704.0973510742188, 1213.6895751953125, 801.6030883789062], 
+"label": 9, "category": "bicycle"}, {"bbox": [1739.02294921875, 558.4058837890625, 1846.942138671875, 786.0907592773438], 
+"label": 1, "category": "person"}, {"bbox": [1460.5987548828125, 646.5602416992188, 1515.2379150390625, 750.3233642578125], 
+"label": 1, "category": "person"}, {"bbox": [1185.5238037109375, 650.65966796875, 1233.99658203125, 771.5936889648438], 
+"label": 1, "category": "person"}]}, 
+"grounding": {"caption": "A bicycle is a human-powered vehicle with two wheels, pedals, a frame, handlebars, and a seat for a rider 
+A person is a living being with a complex physical form, including a head, torso, limbs, and varied appearance based on ethnicity and individual traits 
+A rickshaw is a human-powered or motorized vehicle with a simple frame, seating, and often two or three wheels
+A motorcycle is a two-wheeled motor vehicle with a seat for a rider and often a pillion seat for a passenger", 
+"regions": [{"bbox": [1499.4287109375, 571.8432006835938, 1862.8057861328125, 1053.1231689453125], "phrase": "rickshaw", "tokens_positive": [[0, 8]]}, 
+{"bbox": [901.4893798828125, 580.1137084960938, 1013.2269897460938, 858.8182983398438], "phrase": "person", "tokens_positive": [[0, 6]]}, 
+{"bbox": [1217.8621826171875, 702.2913208007812, 1418.92626953125, 944.481201171875], "phrase": "motorcycle", "tokens_positive": [[0, 10]]}, 
+{"bbox": [1850.3251953125, 627.6378173828125, 1919.9892578125, 880.6907348632812], "phrase": "rickshaw", "tokens_positive": [[0, 8]]}, 
+{"bbox": [1235.5704345703125, 600.7950439453125, 1317.329833984375, 767.8244018554688], "phrase": "person", "tokens_positive": [[0, 6]]}, 
+{"bbox": [986.2377319335938, 619.4569702148438, 1049.1973876953125, 816.837158203125], "phrase": "person", "tokens_positive": [[0, 6]]}, 
+{"bbox": [403.7209167480469, 818.74560546875, 883.7627563476562, 1079.87646484375], "phrase": "bicycle", "tokens_positive": [[0, 7]]}, 
+{"bbox": [1404.5513916015625, 709.8675537109375, 1554.7288818359375, 911.133544921875], "phrase": "motorcycle", "tokens_positive": [[0, 10]]}, 
+{"bbox": [0.8035612106323242, 838.3088989257812, 458.09344482421875, 1079.62890625], "phrase": "motorcycle", "tokens_positive": [[0, 10]]}, 
+{"bbox": [0.0, 510.0132751464844, 435.03643798828125, 1079.2965087890625], "phrase": "person", "tokens_positive": [[0, 6]]}, 
+{"bbox": [491.4589538574219, 537.9569091796875, 770.521484375, 1078.7926025390625], "phrase": "person", "tokens_positive": [[0, 6]]}, 
+{"bbox": [1135.1551513671875, 704.0973510742188, 1213.6895751953125, 801.6030883789062], "phrase": "bicycle", "tokens_positive": [[0, 7]]}, 
+{"bbox": [1739.02294921875, 558.4058837890625, 1846.942138671875, 786.0907592773438], "phrase": "person", "tokens_positive": [[0, 6]]}, 
+{"bbox": [1460.5987548828125, 646.5602416992188, 1515.2379150390625, 750.3233642578125], "phrase": "person", "tokens_positive": [[0, 6]]}, 
+{"bbox": [1185.5238037109375, 650.65966796875, 1233.99658203125, 771.5936889648438], "phrase": "person", "tokens_positive": [[0, 6]]}]}}
+
+
+
+{"filename": "val101.jpg", "height": 1080, "width": 1920, 
+"detection": {"instances": [{"bbox": [471.37615966796875, 498.13873291015625, 582.6593017578125, 899.1597900390625], "label": 1, "category": "person"}, 
+{"bbox": [274.8548889160156, 476.19927978515625, 488.1274719238281, 1078.076904296875], "label": 1, "category": "person"}, 
+{"bbox": [810.3712158203125, 594.466796875, 972.7239990234375, 710.7745361328125], "label": 7, "category": "private car"}, 
+{"bbox": [97.31278991699219, 581.8375854492188, 148.61920166015625, 682.712646484375], "label": 1, "category": "person"}, 
+{"bbox": [463.34759521484375, 509.3925476074219, 884.6790161132812, 929.8683471679688], "label": 2, "category": "rickshaw"}, 
+{"bbox": [0.0, 582.1351928710938, 729.2086791992188, 870.2120361328125], "label": 7, "category": "private car"}, 
+{"bbox": [0.0022226572036743164, 603.5314331054688, 42.34516906738281, 710.26904296875], "label": 1, "category": "person"}, 
+{"bbox": [972.9437255859375, 532.73193359375, 1430.2452392578125, 786.3322143554688], "label": 11, "category": "micro bus"}, 
+{"bbox": [1696.71826171875, 595.2106323242188, 1890.9239501953125, 729.4265747070312], "label": 7, "category": "private car"}, 
+{"bbox": [959.983642578125, 586.6060791015625, 991.5938110351562, 662.4923095703125], "label": 1, "category": "person"}, 
+{"bbox": [1628.326171875, 567.3802490234375, 1802.6519775390625, 702.1987915039062], "label": 11, "category": "micro bus"}, 
+{"bbox": [254.5592041015625, 560.0607299804688, 297.71429443359375, 632.6253051757812], "label": 1, "category": "person"}, 
+{"bbox": [1483.6544189453125, 592.0301513671875, 1672.0205078125, 711.111083984375], "label": 7, "category": "private car"}]}, 
+"grounding": {"caption": "A person is a living being with a complex physical form, including a head, torso, limbs, and varied appearance based on ethnicity and individual traits. 
+A person is a living being with a complex physical form, including a head, torso, limbs, and varied appearance based on ethnicity and individual traits. 
+A private car is a four-wheeled motor vehicle designed for personal transportation, typically with seating for passengers and an enclosed cabin. 
+A person is a living being with a complex physical form, including a head, torso, limbs, and varied appearance based on ethnicity and individual traits. 
+A rickshaw is a human-powered or motorized vehicle with a simple frame, seating, and often two or three wheels. 
+A private car is a four-wheeled motor vehicle designed for personal transportation, typically with seating for passengers and an enclosed cabin. 
+A person is a living being with a complex physical form, including a head, torso, limbs, and varied appearance based on ethnicity and individual traits. 
+A micro bus is a smaller motorized vehicle, similar to a standard bus but more compact with seating for fewer passengers. 
+A private car is a four-wheeled motor vehicle designed for personal transportation, typically with seating for passengers and an enclosed cabin. 
+A person is a living being with a complex physical form, including a head, torso, limbs, and varied appearance based on ethnicity and individual traits. 
+A micro bus is a smaller motorized vehicle, similar to a standard bus but more compact with seating for fewer passengers. 
+A person is a living being with a complex physical form, including a head, torso, limbs, and varied appearance based on ethnicity and individual traits. 
+A private car is a four-wheeled motor vehicle designed for personal transportation, typically with seating for passengers and an enclosed cabin", 
+"regions": [{"bbox": [471.37615966796875, 498.13873291015625, 582.6593017578125, 899.1597900390625], "phrase": "person", "tokens_positive": [[0, 151]]}, 
+{"bbox": [274.8548889160156, 476.19927978515625, 488.1274719238281, 1078.076904296875], "phrase": "person", "tokens_positive": [[151, 302]]}, {"bbox": [810.3712158203125, 594.466796875, 972.7239990234375, 710.7745361328125], "phrase": "private car", "tokens_positive": [[304, 447]]}, {"bbox": [97.31278991699219, 581.8375854492188, 148.61920166015625, 682.712646484375], "phrase": "person", "tokens_positive": [[449, 600]]}, {"bbox": [463.34759521484375, 509.3925476074219, 884.6790161132812, 929.8683471679688], "phrase": "rickshaw", "tokens_positive": [[602, 712]]}, {"bbox": [0.0, 582.1351928710938, 729.2086791992188, 870.2120361328125], "phrase": "private car", "tokens_positive": [[714, 857]]}, {"bbox": [0.0022226572036743164, 603.5314331054688, 42.34516906738281, 710.26904296875], "phrase": "person", "tokens_positive": [[859, 1010]]}, {"bbox": [972.9437255859375, 532.73193359375, 1430.2452392578125, 786.3322143554688], "phrase": "micro bus", "tokens_positive": [[1012, 1132]]}, {"bbox": [1696.71826171875, 595.2106323242188, 1890.9239501953125, 729.4265747070312], "phrase": "private car", "tokens_positive": [[1134, 1277]]}, {"bbox": [959.983642578125, 586.6060791015625, 991.5938110351562, 662.4923095703125], "phrase": "person", "tokens_positive": [[1279, 1430]]}, {"bbox": [1628.326171875, 567.3802490234375, 1802.6519775390625, 702.1987915039062], "phrase": "micro bus", "tokens_positive": [[1432, 1552]]}, {"bbox": [254.5592041015625, 560.0607299804688, 297.71429443359375, 632.6253051757812], "phrase": "person", "tokens_positive": [[1554, 1705]]}, {"bbox": [1483.6544189453125, 592.0301513671875, 1672.0205078125, 711.111083984375], "phrase": "private car", "tokens_positive": [[1707, 1850]]}]}}
+
+
+
+
+
+{"filename": "val101.jpg", 
+"height": 1080, "width": 1920, 
+"detection": {"instances": 
+[{"bbox": [471.37615966796875, 498.13873291015625, 582.6593017578125, 899.1597900390625], "label": 1, "category": "person"}, 
+{"bbox": [274.8548889160156, 476.19927978515625, 488.1274719238281, 1078.076904296875], "label": 1, "category": "person"}, 
+{"bbox": [810.3712158203125, 594.466796875, 972.7239990234375, 710.7745361328125], "label": 7, "category": "private car"}, 
+{"bbox": [97.31278991699219, 581.8375854492188, 148.61920166015625, 682.712646484375], "label": 1, "category": "person"}, 
+{"bbox": [463.34759521484375, 509.3925476074219, 884.6790161132812, 929.8683471679688], "label": 2, "category": "rickshaw"}, 
+{"bbox": [0.0, 582.1351928710938, 729.2086791992188, 870.2120361328125], "label": 7, "category": "private car"}, 
+{"bbox": [0.0022226572036743164, 603.5314331054688, 42.34516906738281, 710.26904296875], "label": 1, "category": "person"}, 
+{"bbox": [972.9437255859375, 532.73193359375, 1430.2452392578125, 786.3322143554688], "label": 11, "category": "micro bus"}, 
+{"bbox": [1696.71826171875, 595.2106323242188, 1890.9239501953125, 729.4265747070312], "label": 7, "category": "private car"}, 
+{"bbox": [959.983642578125, 586.6060791015625, 991.5938110351562, 662.4923095703125], "label": 1, "category": "person"}, 
+{"bbox": [1628.326171875, 567.3802490234375, 1802.6519775390625, 702.1987915039062], "label": 11, "category": "micro bus"}, 
+{"bbox": [254.5592041015625, 560.0607299804688, 297.71429443359375, 632.6253051757812], "label": 1, "category": "person"}, 
+{"bbox": [1483.6544189453125, 592.0301513671875, 1672.0205078125, 711.111083984375], "label": 7, "category": "private car"}]}, 
+"grounding": {"caption": "A person is a living being with a complex physical form, including a head, torso, limbs, and varied appearance based on ethnicity and individual traits. 
+A private car is a four-wheeled motor vehicle designed for personal transportation, typically with seating for passengers and an enclosed cabin. 
+A rickshaw is a human-powered or motorized vehicle with a simple frame, seating, and often two or three wheels. 
+A micro bus is a smaller motorized vehicle, similar to a standard bus but more compact with seating for fewer passengers", 
+"regions": [{"phrase": "person", "bbox": [[471.37615966796875, 498.13873291015625, 582.6593017578125, 899.1597900390625], [274.8548889160156, 476.19927978515625, 488.1274719238281, 1078.076904296875], [97.31278991699219, 581.8375854492188, 148.61920166015625, 682.712646484375], [0.0022226572036743164, 603.5314331054688, 42.34516906738281, 710.26904296875], [959.983642578125, 586.6060791015625, 991.5938110351562, 662.4923095703125], [254.5592041015625, 560.0607299804688, 297.71429443359375, 632.6253051757812]], "tokens_positive": [[0, 151]]}, 
+{"phrase": "private car", "bbox": [[810.3712158203125, 594.466796875, 972.7239990234375, 710.7745361328125], [0.0, 582.1351928710938, 729.2086791992188, 870.2120361328125], [1696.71826171875, 595.2106323242188, 1890.9239501953125, 729.4265747070312], [1483.6544189453125, 592.0301513671875, 1672.0205078125, 711.111083984375]], "tokens_positive": [[153, 296]]}, 
+{"phrase": "rickshaw", "bbox": [[463.34759521484375, 509.3925476074219, 884.6790161132812, 929.8683471679688]], "tokens_positive": [[298, 408]]}, 
+{"phrase": "micro bus", "bbox": [[972.9437255859375, 532.73193359375, 1430.2452392578125, 786.3322143554688], [1628.326171875, 567.3802490234375, 1802.6519775390625, 702.1987915039062]], "tokens_positive": [[410, 530]]}]}}

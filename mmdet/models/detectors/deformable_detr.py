@@ -13,7 +13,7 @@ from mmdet.registry import MODELS
 from mmdet.structures import OptSampleList
 from mmdet.utils import OptConfigType
 from ..layers import (DeformableDetrTransformerDecoder,
-                      DeformableDetrTransformerEncoder, SinePositionalEncoding)
+                      DeformableDetrTransformerEncoder, SinePositionalEncoding, SinePositionalEncoding1D)
 from .base_detr import DetectionTransformer
 
 
@@ -70,8 +70,10 @@ class DeformableDETR(DetectionTransformer):
 
     def _init_layers(self) -> None:
         """Initialize layers except for backbone, neck and bbox_head."""
-        self.positional_encoding = SinePositionalEncoding(
-            **self.positional_encoding)
+        # self.positional_encoding = SinePositionalEncoding(
+        #     **self.positional_encoding)
+        # self.positional_encoding_flattened = self.positional_encoding
+        self.positional_encoding = MODELS.build(self.positional_encoding)
         self.encoder = DeformableDetrTransformerEncoder(**self.encoder)
         self.decoder = DeformableDetrTransformerDecoder(**self.decoder)
         self.embed_dims = self.encoder.embed_dims
@@ -224,6 +226,78 @@ class DeformableDETR(DetectionTransformer):
         else:
             valid_ratios = mlvl_feats[0].new_ones(batch_size, len(mlvl_feats),
                                                   2)
+
+        encoder_inputs_dict = dict(
+            feat=feat_flatten,
+            feat_mask=mask_flatten,
+            feat_pos=lvl_pos_embed_flatten,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            valid_ratios=valid_ratios)
+        decoder_inputs_dict = dict(
+            memory_mask=mask_flatten,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            valid_ratios=valid_ratios)
+        return encoder_inputs_dict, decoder_inputs_dict
+
+    def pre_transformer_flattened(
+            self, 
+            mlvl_feats: Tensor,  # shape (bs, num_levels, C, num_tokens)
+            batch_data_samples: OptSampleList = None) -> Tuple[Dict]:
+
+        batch_size, num_levels, num_tokens, C = mlvl_feats.shape  # (bs, lvl, 300, 256)
+        assert batch_data_samples is not None
+
+        batch_input_shape = batch_data_samples[0].batch_input_shape
+        input_img_h, input_img_w = batch_input_shape
+        img_shape_list = [sample.img_shape for sample in batch_data_samples]
+        same_shape_flag = all(
+            s[0] == input_img_h and s[1] == input_img_w for s in img_shape_list
+        )
+
+        # Prepare mask and positional encoding
+        if torch.onnx.is_in_onnx_export() or same_shape_flag:
+            mask_flatten = None
+            lvl_pos_embed_flatten = []
+            for lvl in range(num_levels):
+                feat = mlvl_feats[:, lvl]  # (bs, num_tokens, C)
+                pos_embed = self.positional_encoding(None, input=feat)  # (bs, num_tokens, C)
+                pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+                lvl_pos_embed_flatten.append(pos_embed)
+        else:
+            masks = mlvl_feats.new_ones((batch_size, input_img_h, input_img_w))
+            for img_id in range(batch_size):
+                img_h, img_w = img_shape_list[img_id]
+                masks[img_id, :img_h, :img_w] = 0
+            mlvl_masks = [F.interpolate(masks[None], size=(1, num_tokens)).to(torch.bool).squeeze(0) for _ in range(num_levels)]
+
+            lvl_pos_embed_flatten = []
+            mask_flatten = []
+            for lvl in range(num_levels):
+                feat = mlvl_feats[:, lvl]  # (bs, num_tokens, C)
+                mask = mlvl_masks[lvl]     # (bs, num_tokens)
+                pos_embed = self.positional_encoding(mask, input=feat)  # (bs, num_tokens, C)
+                pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
+                lvl_pos_embed_flatten.append(pos_embed)
+                mask_flatten.append(mask)
+
+            mask_flatten = torch.cat(mask_flatten, dim=1)  # (bs, num_levels * num_tokens)
+
+        # Flatten features and positional embeddings
+        feat_flatten = mlvl_feats.reshape(batch_size, num_levels * num_tokens, C)  # (bs, num_tokens * num_levels, C)
+        lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, dim=1)            # (bs, num_tokens * num_levels, C)
+
+        spatial_shapes = torch.tensor(
+            [[num_tokens, 1]] * num_levels, device=mlvl_feats.device, dtype=torch.long
+        )  # (num_levels, 2)
+
+        level_start_index = spatial_shapes.prod(1).cumsum(0)
+        level_start_index = torch.cat(
+            [level_start_index.new_zeros(1), level_start_index[:-1]]
+        )  # (num_levels,)
+
+        valid_ratios = mlvl_feats.new_ones(batch_size, num_levels, 2)  # (bs, num_levels, 2)
 
         encoder_inputs_dict = dict(
             feat=feat_flatten,
@@ -570,3 +644,64 @@ class DeformableDETR(DetectionTransformer):
         pos = torch.stack((pos[:, :, :, 0::2].sin(), pos[:, :, :, 1::2].cos()),
                           dim=4).flatten(2)
         return pos
+
+    def pad_crops_per_image(self, crops_per_image):
+        """Pads all crops in the batch to the global max height and width."""
+        padded_crops_all = []
+        global_max_h = max(crop.shape[1] for image_crops in crops_per_image for crop in image_crops)
+        global_max_w = max(crop.shape[2] for image_crops in crops_per_image for crop in image_crops)
+
+        for image_crops in crops_per_image:
+            padded_image_crops = []
+            for crop in image_crops:
+                C, h, w = crop.shape
+                pad_h = global_max_h - h
+                pad_w = global_max_w - w
+                pad = (0, pad_w, 0, pad_h)
+                padded_crop = F.pad(crop, pad, value=0)
+                padded_image_crops.append(padded_crop)
+            padded_crops_all.append(torch.stack(padded_image_crops))
+
+        return torch.stack(padded_crops_all)  # [bs, num_crops, C, global_max_h, global_max_w]
+
+    def pre_transformer_with_crops(self, mlvl_feats, crops_per_image, batch_data_samples=None):
+        """Prepares transformer inputs with crops + per-region prompting, optimized version."""
+        batch_size = mlvl_feats[0].size(0)
+
+        # Step 1: Pad crops per image
+        crops_feats = self.pad_crops_per_image(crops_per_image)  # [bs, num_crops, C, H, W]
+        bs, num_crops, C, H, W = crops_feats.shape
+
+        # Debug: Check padded crop size
+        total_crop_tokens = num_crops * H * W
+        print(f"[DEBUG] Padded crop size: {H}x{W} → {total_crop_tokens} tokens per image")
+        # assert total_crop_tokens <= 8192, f"Too many tokens per crop batch: {total_crop_tokens}"
+
+        # Step 2: Flatten crop features per image
+        crops_feats_flat = crops_feats.view(bs, num_crops, C, -1).permute(0, 1, 3, 2)
+        crops_feats_flat = crops_feats_flat.reshape(bs, -1, C)  # [bs, num_crops * H * W, C]
+
+        # Step 3: Add per-region prompts (optimized with repeat_interleave)
+        region_prompt_expanded = self.region_prompt.repeat_interleave(H * W, dim=1)  # [1, num_crops * H * W, C]
+        crops_feats_flat = crops_feats_flat + region_prompt_expanded  # [bs, num_crops * H * W, C]
+
+        # Step 4: Generate positional embeddings for crops (vectorized)
+        crops_feats_flattened = crops_feats.view(bs * num_crops, C, H, W)
+        pos_embed_crops = self.positional_encoding(None, input=crops_feats_flattened)  # [bs * num_crops, C, H, W]
+        pos_embed_crops = pos_embed_crops.view(bs, num_crops, C, -1).permute(0, 1, 3, 2).reshape(bs, -1, C)  # [bs, num_crops * H * W, C]
+
+        # Step 5: Process original SWIN-T features
+        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(mlvl_feats, batch_data_samples)
+
+        # Step 6: Concatenate crops as prompt tokens (optimized loop)
+        for key, val in [('feat', crops_feats_flat), ('feat_pos', pos_embed_crops)]:
+            encoder_inputs_dict[key] = torch.cat([encoder_inputs_dict[key], val], dim=1)
+
+        # # Optional: Save crop token indices for later (if needed)
+        # encoder_inputs_dict['crop_token_range'] = (
+        #     encoder_inputs_dict['feat'].shape[1] - total_crop_tokens,
+        #     encoder_inputs_dict['feat'].shape[1]
+        # )
+
+        return encoder_inputs_dict, decoder_inputs_dict
+        
