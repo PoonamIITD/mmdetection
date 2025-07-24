@@ -67,16 +67,18 @@ class DeformableDetrTransformerEncoder(DetrTransformerEncoder):
         """
         reference_points = self.get_encoder_reference_points(
             spatial_shapes, valid_ratios, device=query.device)
+
         for layer in self.layers:
-            query = layer(
-                query=query,
-                query_pos=query_pos,
-                key_padding_mask=key_padding_mask,
-                spatial_shapes=spatial_shapes,
-                level_start_index=level_start_index,
-                valid_ratios=valid_ratios,
-                reference_points=reference_points,
-                **kwargs)
+                query = layer(
+                    query=query,
+                    query_pos=query_pos,
+                    key_padding_mask=key_padding_mask,
+                    spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index,
+                    valid_ratios=valid_ratios,
+                    reference_points=reference_points,
+                    **kwargs)
+
         return query
 
     @staticmethod
@@ -247,6 +249,51 @@ class DeformableDetrTransformerEncoderLayer(DetrTransformerEncoderLayer):
             for _ in range(2)
         ]
         self.norms = ModuleList(norms_list)
+    
+    def forward(self, query: Tensor, query_pos: Tensor,
+                key_padding_mask: Tensor, value: Optional[Tensor] = None, **kwargs) -> Tensor:
+        """Forward function of the Deformable DETR encoder layer with support for injected queries.
+
+        Args:
+            query (Tensor): [bs, num_queries, C] → visual + injected proposal tokens.
+            value (Tensor): [bs, num_visual_tokens, C] → only visual tokens for sampling.
+            query_pos (Tensor): Positional encodings, same shape as query.
+            key_padding_mask (Tensor): Optional padding mask.
+            spatial_shapes (Tensor): [num_levels, 2], used only for value (image grid).
+
+        Returns:
+            Tensor: Updated query features.
+        """
+
+        # num_total_queries = query.size(1)
+        if value!=None and isinstance(self.self_attn, MultiScaleDeformableAttention):
+            # MultiScaleDeformableAttention supports query != value
+            num_value_tokens = value.size(1)
+            query = self.self_attn(
+                query=query,
+                key=value,
+                value=value,
+                query_pos=query_pos,
+                key_pos=None,  # key_pos not used
+                key_padding_mask=key_padding_mask[:, :num_value_tokens] if key_padding_mask is not None else None,
+                **kwargs
+            )
+        else:
+            # Fallback to normal self-attn
+           query = self.self_attn(
+                query=query,
+                key=query,
+                value=query,
+                query_pos=query_pos,
+                key_pos=query_pos,
+                key_padding_mask=key_padding_mask,
+                **kwargs)
+
+        query = self.norms[0](query)
+        query = self.ffn(query)
+        query = self.norms[1](query)
+
+        return query
 
 
 class DeformableDetrTransformerDecoderLayer(DetrTransformerDecoderLayer):

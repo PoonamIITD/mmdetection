@@ -17,7 +17,7 @@ model = dict(
     type = 'GroundingDINO',
     def_detr=dict(
         type='DeformableDETR',
-        num_queries=300,
+        num_queries=900,
         as_two_stage=False,
         with_box_refine=False,
         backbone=dict(
@@ -73,7 +73,7 @@ model = dict(
         loss_iou=dict(type='GIoULoss', loss_weight=2.0))
     ),
     # neck=None,  # Remove the original neck (now handled inside DeformableDETR)
-    topk_prompts=10,
+    # topk_prompts=900,
     # num_feature_levels=5,
     # encoder=dict(layer_cfg=dict(self_attn_cfg=dict(num_levels=5))),
     # decoder=dict(

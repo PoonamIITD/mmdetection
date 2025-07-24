@@ -12,7 +12,7 @@ from torch import Tensor
 from mmdet.registry import MODELS
 from mmdet.structures import OptSampleList, SampleList
 from mmdet.utils import ConfigType
-from ..layers import SinePositionalEncoding
+from ..layers import SinePositionalEncoding, SinePositionalEncoding1D
 from ..layers.transformer.grounding_dino_layers import (
     GroundingDinoTransformerDecoder, GroundingDinoTransformerEncoder)
 from .dino import DINO
@@ -54,14 +54,14 @@ class GroundingDINO(DINO):
 
     def __init__(self, 
                 def_detr,
-                topk_prompts,
+                # topk_prompts,
                 language_model,
                 *args,
                 use_autocast=False,
                 **kwargs) -> None:
 
         self.def_detr_cfg = def_detr
-        self.topk_prompts = topk_prompts
+        # self.topk_prompts = topk_prompts
         self.language_model_cfg = language_model
         self._special_tokens = '. '
         self.use_autocast = use_autocast
@@ -72,6 +72,7 @@ class GroundingDINO(DINO):
         # self.positional_encoding = SinePositionalEncoding(
         #     **self.positional_encoding)
         self.positional_encoding = MODELS.build(self.positional_encoding)
+        self.extra_pos_encoder = SinePositionalEncoding1D(num_feats=128)  # for injecting 900 proposals and embeddings form the deformable detr decoder
         self.encoder = GroundingDinoTransformerEncoder(**self.encoder)
         self.decoder = GroundingDinoTransformerDecoder(**self.decoder)
         self.embed_dims = self.encoder.embed_dims
@@ -87,8 +88,8 @@ class GroundingDINO(DINO):
         self.memory_trans_norm = nn.LayerNorm(self.embed_dims)
 
         self.def_detr = MODELS.build(self.def_detr_cfg)
-        self.region_prompt = nn.Parameter(torch.zeros(1, self.topk_prompts, self.embed_dims))  # [1, num_crops, C], # Idea similar to CORA 
-        nn.init.xavier_uniform_(self.region_prompt)  # optional initialization
+        # self.region_prompt = nn.Parameter(torch.zeros(1, self.topk_prompts, self.embed_dims))  # [1, num_crops, C], # Idea similar to CORA 
+        # nn.init.xavier_uniform_(self.region_prompt)  # optional initialization
 
         # text modules
         self.language_model = MODELS.build(self.language_model_cfg)
@@ -314,9 +315,12 @@ class GroundingDINO(DINO):
         img_feats: Tuple[Tensor],
         text_dict: Dict,
         batch_data_samples: OptSampleList = None,
-        crops_per_image: Optional[Any] = None,
+        def_detr_topk_proposals: Optional[Tensor] = None,            # [bs, 900, 4]
+        def_detr_reference_points: Optional[Tensor] = None,          # [bs, 900, 2]
+        def_detr_decoder_embeddings: Optional[Tensor] = None         # [bs, 900, 256]
+        # crops_per_image: Optional[Any] = None,
     ) -> Dict:
-        # encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer_flattened(
+        # encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer_f lattened(
         #     img_feats, batch_data_samples)
 
         # mlvl_feats_with_dummy = list(img_feats) + [img_feats[-1]]  # Now 5 levels
@@ -324,11 +328,25 @@ class GroundingDINO(DINO):
         #     mlvl_feats_with_dummy, batch_data_samples)
         
 
-        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer_with_crops(
-            img_feats, crops_per_image, batch_data_samples)
+        # encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer_with_crops(
+        #     img_feats, crops_per_image, batch_data_samples)
+        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
+             img_feats, batch_data_samples)
         
+        encoder_inputs_dict['def_detr_ref_points'] = None
+        if def_detr_decoder_embeddings is not None and def_detr_reference_points is not None:
+            # Inject 900 token embeddings as extra features
+            encoder_inputs_dict['feat'] = torch.cat([encoder_inputs_dict['feat'], def_detr_decoder_embeddings], dim=1)  # [bs, visual_feats_flattened + 900, 256]
+            # Generate sinusoidal positional embeddings for the extra 900 tokens
+            extra_pos = self.extra_pos_encoder(input=def_detr_decoder_embeddings)  # [bs, visual_feats_pos_flattened + 900, 256] eg. [bs,18088 + 900, 256]
+            encoder_inputs_dict['feat_pos'] = torch.cat([encoder_inputs_dict['feat_pos'], extra_pos], dim =1)
+            encoder_inputs_dict['def_detr_ref_points'] = def_detr_reference_points
+
         encoder_outputs_dict = self.forward_encoder(
             **encoder_inputs_dict, text_dict=text_dict)
+        
+        if def_detr_topk_proposals is not None:
+            encoder_outputs_dict['def_detr_topk_proposals'] = def_detr_topk_proposals
 
         tmp_dec_in, head_inputs_dict = self.pre_decoder(
             **encoder_outputs_dict, batch_data_samples=batch_data_samples)
@@ -341,6 +359,7 @@ class GroundingDINO(DINO):
     def forward_encoder(self, feat: Tensor, feat_mask: Tensor,
                         feat_pos: Tensor, spatial_shapes: Tensor,
                         level_start_index: Tensor, valid_ratios: Tensor,
+                        def_detr_ref_points: Tensor, 
                         text_dict: Dict) -> Dict:
         text_token_mask = text_dict['text_token_mask']
         memory, memory_text = self.encoder(
@@ -350,6 +369,7 @@ class GroundingDINO(DINO):
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
             valid_ratios=valid_ratios,
+            def_detr_ref_points=def_detr_ref_points,
             # for text encoder
             memory_text=text_dict['embedded'],
             text_attention_mask=~text_token_mask,
@@ -370,12 +390,21 @@ class GroundingDINO(DINO):
         spatial_shapes: Tensor,
         memory_text: Tensor,
         text_token_mask: Tensor,
+        def_detr_topk_proposals: Optional[Tensor] = None,
         batch_data_samples: OptSampleList = None,
     ) -> Tuple[Dict]:
         bs, _, c = memory.shape
 
         output_memory, output_proposals = self.gen_encoder_output_proposals(
             memory, memory_mask, spatial_shapes)
+        
+        # code change for injecting visual cues. Here we concatenating the topk_proposals from def_detr to output_proposals 
+        # and modifying memory to not include the sampled feature map values corresponding to 900 extra locations as we don't to take it further to decoder
+        if(output_memory.shape[1]!=output_proposals.shape[1] and def_detr_topk_proposals!=None):
+            # Remove the extra tokens from memory (not used in decoder)
+            memory = memory[:, :output_proposals.shape[1], :]
+            # Concatenate visual proposals with top-k proposals from def_detr
+            output_proposals = torch.cat([output_proposals, def_detr_topk_proposals], dim=1)
 
         enc_outputs_class = self.bbox_head.cls_branches[
             self.decoder.num_layers](output_memory, memory_text,
@@ -463,7 +492,7 @@ class GroundingDINO(DINO):
         # Forward through bbox head
         outs = self.def_detr.bbox_head(hidden_states, references)
 
-        return outs   # class_scores- (bs, 300, num_classes) and  bbox_preds- (bs, 300, 4)  
+        return outs[1][-1], references[-1], hidden_states[-1]   # bbox_preds- (bs, 900, 4) and  reference_points- (bs, 900, 2)  and visual embeddings (bs, 900, 256)
 
     def crop_raw_features_from_swin(self, outs,
                                     visual_feat,  # [bs, C, H_feat, W_feat] from SWIN-T
@@ -666,15 +695,16 @@ class GroundingDINO(DINO):
 
         # image feature extraction
         visual_feats = self.extract_feat(batch_inputs)
-        outs = self.forward_features(batch_inputs, batch_data_samples)
-        crops_per_image = self.crop_raw_features_from_swin(
-            outs=outs,
-            visual_feat=visual_feats[0],  # SWIN-T highest resolution
-            img_metas=[x.metainfo for x in batch_data_samples],
-            topk=self.topk_prompts,
-            use_sigmoid=True,
-            num_classes= self.bbox_head.cls_out_channels
-            )
+        def_detr_topk_proposals, def_detr_reference_points, def_detr_decoder_embeddings  = self.forward_features(batch_inputs, batch_data_samples) # most refined outputs per query.
+
+        # crops_per_image = self.crop_raw_features_from_swin(
+        #     outs=outs,
+        #     visual_feat=visual_feats[0],  # SWIN-T highest resolution
+        #     img_metas=[x.metainfo for x in batch_data_samples],
+        #     topk=self.topk_prompts,
+        #     use_sigmoid=True,
+        #     num_classes= self.bbox_head.cls_out_channels
+        #     )
         # def_detr_cropped_feats = self.extract_crops(
         #     swin_feat_map=visual_feats[0],      # highest-resolution SWIN-T feature
         #     bbox_preds=def_detr_preds,
@@ -706,10 +736,14 @@ class GroundingDINO(DINO):
                 batch_data_samples[
                     0].token_positive_map = token_positive_maps_once
 
-                head_inputs_dict = self.forward_transformer(
-                    copy.deepcopy(visual_feats), text_dict, batch_data_samples, crops_per_image)
+                # head_inputs_dict = self.forward_transformer(
+                #     copy.deepcopy(visual_feats), text_dict, batch_data_samples, crops_per_image)
                 # head_inputs_dict = self.forward_transformer(
                 #     copy.deepcopy(visual_feats), text_dict, batch_data_samples)
+                head_inputs_dict = self.forward_transformer(
+                    copy.deepcopy(visual_feats), text_dict, batch_data_samples,
+                    def_detr_topk_proposals,def_detr_reference_points,
+                    def_detr_decoder_embeddings)
                 pred_instances = self.bbox_head.predict(
                     **head_inputs_dict,
                     rescale=rescale,
@@ -737,10 +771,14 @@ class GroundingDINO(DINO):
                     is_rec_tasks.append(True)
                 data_samples.token_positive_map = token_positive_maps[i]
 
-            head_inputs_dict = self.forward_transformer(
-                visual_feats, text_dict, batch_data_samples, crops_per_image)
+            # head_inputs_dict = self.forward_transformer(
+            #     visual_feats, text_dict, batch_data_samples, crops_per_image)
             # head_inputs_dict = self.forward_transformer(
             #     visual_feats, text_dict, batch_data_samples)
+            head_inputs_dict = self.forward_transformer(
+                    copy.deepcopy(visual_feats), text_dict, batch_data_samples,
+                    def_detr_topk_proposals,def_detr_reference_points,
+                    def_detr_decoder_embeddings)
             results_list = self.bbox_head.predict(
                 **head_inputs_dict,
                 rescale=rescale,

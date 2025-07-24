@@ -600,11 +600,25 @@ class DeformableDETR(DetectionTransformer):
             ~output_proposals_valid, float('inf'))
 
         output_memory = memory
-        if memory_mask is not None:
-            output_memory = output_memory.masked_fill(
-                memory_mask.unsqueeze(-1), float(0))
-        output_memory = output_memory.masked_fill(~output_proposals_valid,
-                                                  float(0))
+
+        # masking only visual part (Code change for injecting visual cues)
+        if output_memory.shape[1] != output_proposals_valid.shape[1]:
+            vis_len = output_proposals_valid.shape[1]
+            if memory_mask is not None:
+                output_memory[:, :vis_len, :] = output_memory[:, :vis_len, :].masked_fill(
+                    memory_mask[:, :vis_len].unsqueeze(-1), 0
+                )
+            output_memory[:, :vis_len, :] = output_memory[:, :vis_len, :].masked_fill(
+                ~output_proposals_valid, 0
+            )
+        
+        else:
+            if memory_mask is not None:
+                output_memory = output_memory.masked_fill(
+                    memory_mask.unsqueeze(-1), float(0))
+            output_memory = output_memory.masked_fill(~output_proposals_valid,
+                                                    float(0))
+        
         output_memory = self.memory_trans_fc(output_memory)
         output_memory = self.memory_trans_norm(output_memory)
         # [bs, sum(hw), 2]
