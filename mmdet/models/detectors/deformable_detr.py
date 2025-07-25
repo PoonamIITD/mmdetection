@@ -593,26 +593,29 @@ class DeformableDETR(DetectionTransformer):
                 -1, keepdim=True) == output_proposals.shape[-1]
         # inverse_sigmoid
         output_proposals = torch.log(output_proposals / (1 - output_proposals))
-        if memory_mask is not None:
+        output_memory = memory
+        # Case 1: Injected extra tokens — handle masking only for the visual part
+        if output_memory.shape[1] != output_proposals_valid.shape[1]:
+            vis_len = output_proposals_valid.shape[1]  # e.g., 17512
+
+            # Mask proposals (only first vis_len tokens)
+            if memory_mask is not None:
+                output_proposals = output_proposals.masked_fill(memory_mask[:, :vis_len].unsqueeze(-1), float('inf'))
+            output_proposals = output_proposals.masked_fill(~output_proposals_valid, float('inf'))
+
+            # Mask memory (only first vis_len tokens)
+            if memory_mask is not None:
+                output_memory = output_memory.masked_fill(memory_mask.unsqueeze(-1), float(0))
+            output_memory[:, :vis_len, :] = output_memory[:, :vis_len, :].masked_fill(~output_proposals_valid, float(0))
+
+        # Case 2: Default case (no extra tokens injected — standard logic)
+        else:
+            if memory_mask is not None:
+                output_proposals = output_proposals.masked_fill(
+                    memory_mask.unsqueeze(-1), float('inf'))
             output_proposals = output_proposals.masked_fill(
-                memory_mask.unsqueeze(-1), float('inf'))
-        output_proposals = output_proposals.masked_fill(
             ~output_proposals_valid, float('inf'))
 
-        output_memory = memory
-
-        # masking only visual part (Code change for injecting visual cues)
-        if output_memory.shape[1] != output_proposals_valid.shape[1]:
-            vis_len = output_proposals_valid.shape[1]
-            if memory_mask is not None:
-                output_memory[:, :vis_len, :] = output_memory[:, :vis_len, :].masked_fill(
-                    memory_mask[:, :vis_len].unsqueeze(-1), 0
-                )
-            output_memory[:, :vis_len, :] = output_memory[:, :vis_len, :].masked_fill(
-                ~output_proposals_valid, 0
-            )
-        
-        else:
             if memory_mask is not None:
                 output_memory = output_memory.masked_fill(
                     memory_mask.unsqueeze(-1), float(0))

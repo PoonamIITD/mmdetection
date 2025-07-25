@@ -71,13 +71,16 @@ class GroundingDINO(DINO):
         """Initialize layers except for backbone, neck and bbox_head."""
         # self.positional_encoding = SinePositionalEncoding(
         #     **self.positional_encoding)
-        self.positional_encoding = MODELS.build(self.positional_encoding)
-        self.extra_pos_encoder = SinePositionalEncoding1D(num_feats=128)  # for injecting 900 proposals and embeddings form the deformable detr decoder
+        self.positional_encoding = MODELS.build(self.positional_encoding)  
         self.encoder = GroundingDinoTransformerEncoder(**self.encoder)
         self.decoder = GroundingDinoTransformerDecoder(**self.decoder)
         self.embed_dims = self.encoder.embed_dims
         self.query_embedding = nn.Embedding(self.num_queries, self.embed_dims)
         num_feats = self.positional_encoding.num_feats
+        # for injecting 900 proposals and embeddings form the deformable detr decoder
+        self.def_detr_proj = nn.Sequential(nn.Linear(self.embed_dims, self.embed_dims),
+                                           nn.LayerNorm(self.embed_dims))
+        self.extra_pos_encoder = SinePositionalEncoding1D(num_feats=num_feats)
         assert num_feats * 2 == self.embed_dims, \
             f'embed_dims should be exactly 2 times of num_feats. ' \
             f'Found {self.embed_dims} and {num_feats}.'
@@ -320,7 +323,7 @@ class GroundingDINO(DINO):
         def_detr_decoder_embeddings: Optional[Tensor] = None         # [bs, 900, 256]
         # crops_per_image: Optional[Any] = None,
     ) -> Dict:
-        # encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer_f lattened(
+        # encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer_flattened(
         #     img_feats, batch_data_samples)
 
         # mlvl_feats_with_dummy = list(img_feats) + [img_feats[-1]]  # Now 5 levels
@@ -335,12 +338,20 @@ class GroundingDINO(DINO):
         
         encoder_inputs_dict['def_detr_ref_points'] = None
         if def_detr_decoder_embeddings is not None and def_detr_reference_points is not None:
+            bs, num_extra = def_detr_decoder_embeddings.shape[:2]  # [bs, 900]
+            device = encoder_inputs_dict['feat'].device
             # Inject 900 token embeddings as extra features
-            encoder_inputs_dict['feat'] = torch.cat([encoder_inputs_dict['feat'], def_detr_decoder_embeddings], dim=1)  # [bs, visual_feats_flattened + 900, 256]
+            projected_embeddings = self.def_detr_proj(def_detr_decoder_embeddings)  # [bs, 900, 256]
+            encoder_inputs_dict['feat'] = torch.cat([encoder_inputs_dict['feat'], projected_embeddings], dim=1)  # [bs, visual_feats_flattened + 900, 256]
             # Generate sinusoidal positional embeddings for the extra 900 tokens
             extra_pos = self.extra_pos_encoder(input=def_detr_decoder_embeddings)  # [bs, visual_feats_pos_flattened + 900, 256] eg. [bs,18088 + 900, 256]
             encoder_inputs_dict['feat_pos'] = torch.cat([encoder_inputs_dict['feat_pos'], extra_pos], dim =1)
+            # Update feat_mask by adding 900 False (unmasked) tokens, usable token that need to be attended
+            if encoder_inputs_dict['feat_mask'] is not None:
+                extra_mask = torch.zeros((bs, num_extra), dtype=torch.bool, device = device)  # [bs, 900]
+                encoder_inputs_dict['feat_mask'] = torch.cat([encoder_inputs_dict['feat_mask'], extra_mask], dim=1)
             encoder_inputs_dict['def_detr_ref_points'] = def_detr_reference_points
+
 
         encoder_outputs_dict = self.forward_encoder(
             **encoder_inputs_dict, text_dict=text_dict)
@@ -624,6 +635,7 @@ class GroundingDINO(DINO):
         if self.use_autocast:
             with autocast(enabled=True):
                 visual_features = self.extract_feat(batch_inputs)
+                def_detr_topk_proposals, def_detr_reference_points, def_detr_decoder_embeddings  = self.forward_features(batch_inputs, batch_data_samples) # most refined outputs per query.
                 # visual_feats = self.forward_features(batch_inputs, batch_data_samples)
                 # hidden_states = visual_feats['hidden_states'] # [6, bs, 300, C]
                 # last_four = hidden_states[-4:]  # [3, bs, 300, C]
@@ -637,6 +649,7 @@ class GroundingDINO(DINO):
                 # visual_features = [reshaped_feats[i] for i in range(4)]  # each: [bs, C, 15, 20]
         else:
             visual_features = self.extract_feat(batch_inputs)
+            def_detr_topk_proposals, def_detr_reference_points, def_detr_decoder_embeddings  = self.forward_features(batch_inputs, batch_data_samples) # most refined outputs per query.
             # visual_feats = self.forward_features(batch_inputs, batch_data_samples)
             # hidden_states = visual_feats['hidden_states'] # [6, bs, 300, C]
             # last_four = hidden_states[-4:]  # [3, bs, 300, C]
@@ -648,8 +661,12 @@ class GroundingDINO(DINO):
 
             # Convert into list of 3 tensors
             # visual_features = [reshaped_feats[i] for i in range(4)]  # each: [bs, C, 15, 20]
-        head_inputs_dict = self.forward_transformer(visual_features, text_dict,
-                                                    batch_data_samples)
+        # head_inputs_dict = self.forward_transformer(visual_features, text_dict,
+        #                                             batch_data_samples)
+        head_inputs_dict = self.forward_transformer(
+                    visual_features, text_dict, batch_data_samples,
+                    def_detr_topk_proposals,def_detr_reference_points,
+                    def_detr_decoder_embeddings)
 
         losses = self.bbox_head.loss(
             **head_inputs_dict, batch_data_samples=batch_data_samples)

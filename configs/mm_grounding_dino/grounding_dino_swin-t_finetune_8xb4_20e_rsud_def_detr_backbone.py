@@ -183,8 +183,15 @@ optim_wrapper = dict(
     paramwise_cfg=dict(
         custom_keys={
             'absolute_pos_embed': dict(decay_mult=0.),
+            # frozen: top-level backbone of Grounding DINO (Swin-T)
             'backbone': dict(lr_mult=0.0),
-            'language_model': dict(lr_mult=0.0)
+            # Freeze the language model (CLIP)
+            'language_model': dict(lr_mult=0.0),
+             # Now we explicitly freeze def_detr parts except bbox_head
+            'def_detr.backbone': dict(lr_mult=0.0),
+            'def_detr.encoder': dict(lr_mult=0.0),
+            'def_detr.decoder': dict(lr_mult=0.0),
+            'def_detr.neck': dict(lr_mult=0.0)
         }))
 
 load_from = 'https://download.openmmlab.com/mmdetection/v3.0/mm_grounding_dino/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det/grounding_dino_swin-t_pretrain_obj365_goldg_grit9m_v3det_20231204_095047-b448804b.pth'  # noqa
