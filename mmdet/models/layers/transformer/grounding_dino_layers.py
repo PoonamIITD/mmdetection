@@ -211,22 +211,23 @@ class GroundingDinoTransformerEncoder(DeformableDetrTransformerEncoder):
             spatial_shapes, valid_ratios, device=query.device)
         
         # def_detr_ref_points: [bs, 900, 2]
-        bs, num_queries, _ = def_detr_ref_points.shape
-        num_levels = spatial_shapes.shape[0]  # should be 4
+        if def_detr_ref_points is not None:
+            bs, num_queries, _ = def_detr_ref_points.shape
+            num_levels = spatial_shapes.shape[0]  # should be 4
 
-        # Expand to [bs, 900, 4, 2]
-        ref_points = def_detr_ref_points.unsqueeze(2).expand(-1, -1, num_levels, -1)  # [bs, 900, 4, 2]
-        # spatial_shapes: [4, 2] → [1, 4, 2]
-        spatial_shapes_ = spatial_shapes[None, :, :].to(valid_ratios.device)  # [1, 4, 2]
+            # Expand to [bs, 900, 4, 2]
+            ref_points = def_detr_ref_points.unsqueeze(2).expand(-1, -1, num_levels, -1)  # [bs, 900, 4, 2]
+            # spatial_shapes: [4, 2] → [1, 4, 2]
+            spatial_shapes_ = spatial_shapes[None, :, :].to(valid_ratios.device)  # [1, 4, 2]
 
-        # valid_ratios: [bs, 4, 2]
-        scale = valid_ratios * spatial_shapes_  # [bs, 4, 2]
-        # ref_points: [bs, 900, 4, 2]
-        # scale: [bs, 4, 2] → [bs, 1, 4, 2]
-        ref_points_scaled = ref_points / scale.unsqueeze(1)  # [bs, 900, 4, 2]
-        # final normalized ref points
-        normalized_ref_points = ref_points_scaled * valid_ratios.unsqueeze(1)  # [bs, 900, 4, 2]
-        reference_points = torch.cat([reference_points, normalized_ref_points], dim=1) # [bs, num_queires+900, shape]
+            # valid_ratios: [bs, 4, 2]
+            scale = valid_ratios * spatial_shapes_  # [bs, 4, 2]
+            # ref_points: [bs, 900, 4, 2]
+            # scale: [bs, 4, 2] → [bs, 1, 4, 2]
+            ref_points_scaled = ref_points / scale.unsqueeze(1)  # [bs, 900, 4, 2]
+            # final normalized ref points
+            normalized_ref_points = ref_points_scaled * valid_ratios.unsqueeze(1)  # [bs, 900, 4, 2]
+            reference_points = torch.cat([reference_points, normalized_ref_points], dim=1) # [bs, num_queires+900, shape]
 
         if self.text_layers:
             # generate pos_text
@@ -264,14 +265,23 @@ class GroundingDinoTransformerEncoder(DeformableDetrTransformerEncoder):
                     key_padding_mask=None,
                 )
             # code change for injecting visual cues
-            output = layer(
-                query=output,                                   # [bs, vis_features+900, 256]
-                value=output[:, :output.shape[1] - 900],        # [bs, 18088, 256]
-                query_pos=query_pos,                            # [bs, 18988, 256]
-                reference_points=reference_points,
-                spatial_shapes=spatial_shapes,
-                level_start_index=level_start_index,
-                key_padding_mask=key_padding_mask)
+            if def_detr_ref_points is not None:
+                output = layer(
+                    query=output,                                   # [bs, vis_features+900, 256]
+                    value=output[:, :output.shape[1] - 900],        # [bs, 18088, 256]
+                    query_pos=query_pos,                            # [bs, 18988, 256]
+                    reference_points=reference_points,
+                    spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index,
+                    key_padding_mask=key_padding_mask)
+            else:
+                output = layer(
+                    query=output,                              
+                    query_pos=query_pos,
+                    reference_points=reference_points,
+                    spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index,
+                    key_padding_mask=key_padding_mask)
         return output, memory_text
 
 

@@ -344,7 +344,8 @@ class GroundingDINO(DINO):
             projected_embeddings = self.def_detr_proj(def_detr_decoder_embeddings)  # [bs, 900, 256]
             encoder_inputs_dict['feat'] = torch.cat([encoder_inputs_dict['feat'], projected_embeddings], dim=1)  # [bs, visual_feats_flattened + 900, 256]
             # Generate sinusoidal positional embeddings for the extra 900 tokens
-            extra_pos = self.extra_pos_encoder(input=def_detr_decoder_embeddings)  # [bs, visual_feats_pos_flattened + 900, 256] eg. [bs,18088 + 900, 256]
+            with torch.no_grad():
+                extra_pos = self.extra_pos_encoder(input=def_detr_decoder_embeddings)  # [bs, visual_feats_pos_flattened + 900, 256] eg. [bs,18088 + 900, 256]
             encoder_inputs_dict['feat_pos'] = torch.cat([encoder_inputs_dict['feat_pos'], extra_pos], dim =1)
             # Update feat_mask by adding 900 False (unmasked) tokens, usable token that need to be attended
             if encoder_inputs_dict['feat_mask'] is not None:
@@ -370,7 +371,7 @@ class GroundingDINO(DINO):
     def forward_encoder(self, feat: Tensor, feat_mask: Tensor,
                         feat_pos: Tensor, spatial_shapes: Tensor,
                         level_start_index: Tensor, valid_ratios: Tensor,
-                        def_detr_ref_points: Tensor, 
+                        def_detr_ref_points: Optional[Tensor], 
                         text_dict: Dict) -> Dict:
         text_token_mask = text_dict['text_token_mask']
         memory, memory_text = self.encoder(
@@ -490,20 +491,21 @@ class GroundingDINO(DINO):
                 'cls_scores': Tensor of shape [bs, num_queries, num_classes]
             }
         """
-        # Step 1: Extract features from backbone + neck
-        img_feats = self.def_detr.extract_feat(batch_inputs)
+        with torch.no_grad(): # freeze backbone + transformer
+            # Step 1: Extract features from backbone + neck
+            img_feats = self.def_detr.extract_feat(batch_inputs)
 
-        # Step 2: Transformer encoding/decoding
-        head_inputs_dict = self.def_detr.forward_transformer(img_feats, batch_data_samples)
+            # Step 2: Transformer encoding/decoding
+            head_inputs_dict = self.def_detr.forward_transformer(img_feats, batch_data_samples)
 
+            decoder_outputs = head_inputs_dict['hidden_states']  # usually a list of decoder layer outputs
+            reference_points = head_inputs_dict['references']      # reference points from the decoder
+        
         # Step 3: Run bbox head to get predictions
-        hidden_states = head_inputs_dict['hidden_states']  # usually a list of decoder layer outputs
-        references = head_inputs_dict['references']      # reference points from the decoder
+        # Forward through bbox head and allow grads in bbox head
+        cls_scores, bbox_preds = self.def_detr.bbox_head(decoder_outputs, reference_points)
 
-        # Forward through bbox head
-        outs = self.def_detr.bbox_head(hidden_states, references)
-
-        return outs[1][-1], references[-1], hidden_states[-1]   # bbox_preds- (bs, 900, 4) and  reference_points- (bs, 900, 2)  and visual embeddings (bs, 900, 256)
+        return bbox_preds[-1], reference_points[-1], decoder_outputs[-1]   # bbox_preds- (bs, 900, 4) and  reference_points- (bs, 900, 2)  and visual embeddings (bs, 900, 256)
 
     def crop_raw_features_from_swin(self, outs,
                                     visual_feat,  # [bs, C, H_feat, W_feat] from SWIN-T
