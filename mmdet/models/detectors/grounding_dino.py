@@ -346,6 +346,7 @@ class GroundingDINO(DINO):
             # Generate sinusoidal positional embeddings for the extra 900 tokens
             with torch.no_grad():
                 extra_pos = self.extra_pos_encoder(input=def_detr_decoder_embeddings)  # [bs, visual_feats_pos_flattened + 900, 256] eg. [bs,18088 + 900, 256]
+                # extra_pos = self.get_2d_sincos_pos_embed_from_refpoints(def_detr_reference_points, embed_dim=256)
             encoder_inputs_dict['feat_pos'] = torch.cat([encoder_inputs_dict['feat_pos'], extra_pos], dim =1)
             # Update feat_mask by adding 900 False (unmasked) tokens, usable token that need to be attended
             if encoder_inputs_dict['feat_mask'] is not None:

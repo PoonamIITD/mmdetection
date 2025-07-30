@@ -310,3 +310,37 @@ class SinePositionalEncoding1D(BaseModule):
         pos = torch.cat([pos_sin, pos_cos], dim=2)  # [bs, num_tokens, 2 * num_feats]
 
         return pos
+
+@MODELS.register_module()
+class SinePositionalEncodingFromRefPoints(nn.Module):
+    def __init__(self, num_feats=128, temperature=10000, normalize=False, scale=2 * math.pi):
+        super().__init__()
+        self.num_feats = num_feats
+        self.temperature = temperature
+        self.normalize = normalize
+        self.scale = scale
+
+    def forward(self, ref_points: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            ref_points: Tensor of shape [bs, num_queries, 2] in normalized coords (0-1)
+        
+        Returns:
+            pos_embed: Tensor of shape [bs, num_queries, num_feats * 2]
+        """
+        assert ref_points.size(-1) == 2, "Only supports 2D reference points"
+        if self.normalize:
+            ref_points = ref_points * self.scale
+
+        dim_t = torch.arange(self.num_feats, dtype=torch.float32, device=ref_points.device)
+        dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_feats)
+
+        # [bs, num_queries, 1, num_feats]
+        pos_x = ref_points[..., 0][..., None] / dim_t
+        pos_y = ref_points[..., 1][..., None] / dim_t
+
+        pos_x = torch.stack((pos_x[..., 0::2].sin(), pos_x[..., 1::2].cos()), dim=-1).flatten(-2)
+        pos_y = torch.stack((pos_y[..., 0::2].sin(), pos_y[..., 1::2].cos()), dim=-1).flatten(-2)
+
+        pos = torch.cat((pos_x, pos_y), dim=-1)  # [bs, num_queries, 2 * num_feats]
+        return pos

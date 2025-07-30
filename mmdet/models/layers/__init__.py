@@ -15,7 +15,8 @@ from .pixel_decoder import PixelDecoder, TransformerEncoderPixelDecoder
 from .positional_encoding import (LearnedPositionalEncoding,
                                   SinePositionalEncoding,
                                   SinePositionalEncoding3D,
-                                  SinePositionalEncoding1D)
+                                  SinePositionalEncoding1D, 
+                                  SinePositionalEncodingFromRefPoints)
 from .res_layer import ResLayer, SimplifiedBasicBlock
 from .se_layer import ChannelAttention, DyReLU, SELayer
 # yapf: disable
