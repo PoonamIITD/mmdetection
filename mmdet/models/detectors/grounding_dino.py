@@ -12,7 +12,7 @@ from torch import Tensor
 from mmdet.registry import MODELS
 from mmdet.structures import OptSampleList, SampleList
 from mmdet.utils import ConfigType
-from ..layers import SinePositionalEncoding, SinePositionalEncoding1D
+from ..layers import SinePositionalEncodingFromRefPoints
 from ..layers.transformer.grounding_dino_layers import (
     GroundingDinoTransformerDecoder, GroundingDinoTransformerEncoder)
 from .dino import DINO
@@ -80,7 +80,8 @@ class GroundingDINO(DINO):
         # for injecting 900 proposals and embeddings form the deformable detr decoder
         self.def_detr_proj = nn.Sequential(nn.Linear(self.embed_dims, self.embed_dims),
                                            nn.LayerNorm(self.embed_dims))
-        self.extra_pos_encoder = SinePositionalEncoding1D(num_feats=num_feats)
+        # self.extra_pos_encoder = SinePositionalEncoding1D(num_feats=num_feats)
+        self.extra_pos_encoder = SinePositionalEncodingFromRefPoints(num_feats=num_feats, normalize=True, temperature=20)
         assert num_feats * 2 == self.embed_dims, \
             f'embed_dims should be exactly 2 times of num_feats. ' \
             f'Found {self.embed_dims} and {num_feats}.'
@@ -90,12 +91,12 @@ class GroundingDINO(DINO):
         self.memory_trans_fc = nn.Linear(self.embed_dims, self.embed_dims)
         self.memory_trans_norm = nn.LayerNorm(self.embed_dims)
 
-        self.def_detr = MODELS.build(self.def_detr_cfg)
+        self.def_detr = MODELS.build(copy.deepcopy(self.def_detr_cfg))
         # self.region_prompt = nn.Parameter(torch.zeros(1, self.topk_prompts, self.embed_dims))  # [1, num_crops, C], # Idea similar to CORA 
         # nn.init.xavier_uniform_(self.region_prompt)  # optional initialization
 
         # text modules
-        self.language_model = MODELS.build(self.language_model_cfg)
+        self.language_model = MODELS.build(copy.deepcopy(self.language_model_cfg))
         self.text_feat_map = nn.Linear(
             self.language_model.language_backbone.body.language_dim,
             self.embed_dims,
@@ -345,9 +346,9 @@ class GroundingDINO(DINO):
             encoder_inputs_dict['feat'] = torch.cat([encoder_inputs_dict['feat'], projected_embeddings], dim=1)  # [bs, visual_feats_flattened + 900, 256]
             # Generate sinusoidal positional embeddings for the extra 900 tokens
             with torch.no_grad():
-                extra_pos = self.extra_pos_encoder(input=def_detr_decoder_embeddings)  # [bs, visual_feats_pos_flattened + 900, 256] eg. [bs,18088 + 900, 256]
-                # extra_pos = self.get_2d_sincos_pos_embed_from_refpoints(def_detr_reference_points, embed_dim=256)
-            encoder_inputs_dict['feat_pos'] = torch.cat([encoder_inputs_dict['feat_pos'], extra_pos], dim =1)
+                # extra_pos = self.extra_pos_encoder(input=def_detr_decoder_embeddings)  
+                extra_pos = self.extra_pos_encoder(def_detr_reference_points)
+            encoder_inputs_dict['feat_pos'] = torch.cat([encoder_inputs_dict['feat_pos'], extra_pos], dim =1) # [bs, visual_feats_pos_flattened + 900, 256] eg. [bs,18088 + 900, 256]
             # Update feat_mask by adding 900 False (unmasked) tokens, usable token that need to be attended
             if encoder_inputs_dict['feat_mask'] is not None:
                 extra_mask = torch.zeros((bs, num_extra), dtype=torch.bool, device = device)  # [bs, 900]
