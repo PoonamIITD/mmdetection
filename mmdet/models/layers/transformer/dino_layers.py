@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import warnings
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional, List
 
 import torch
 from mmengine.model import BaseModule
@@ -27,6 +27,7 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 self_attn_mask: Tensor, reference_points: Tensor,
                 spatial_shapes: Tensor, level_start_index: Tensor,
                 valid_ratios: Tensor, reg_branches: nn.ModuleList,
+                memory_per_layer: Optional[List[Tensor]] = None,
                 **kwargs) -> Tuple[Tensor]:
         """Forward function of Transformer decoder.
 
@@ -70,7 +71,17 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
         """
         intermediate = []
         intermediate_reference_points = [reference_points]
+        if memory_per_layer is not None:
+            # Support list of tensors OR stacked tensor
+            num_enc_layers = (len(memory_per_layer) 
+                            if isinstance(memory_per_layer, (list, tuple)) 
+                            else memory_per_layer.shape[0])
+            assert num_enc_layers == len(self.layers), \
+                f"Decoder has {len(self.layers)} layers, " \
+                f"but got {num_enc_layers} encoder outputs"
         for lid, layer in enumerate(self.layers):
+            # Pick encoder output
+            layer_value = value if memory_per_layer is None else memory_per_layer[lid]
             if reference_points.shape[-1] == 4:
                 reference_points_input = \
                     reference_points[:, :, None] * torch.cat(
@@ -87,7 +98,7 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
             query = layer(
                 query,
                 query_pos=query_pos,
-                value=value,
+                value=layer_value,
                 key_padding_mask=key_padding_mask,
                 self_attn_mask=self_attn_mask,
                 spatial_shapes=spatial_shapes,

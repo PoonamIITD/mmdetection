@@ -177,7 +177,8 @@ class GroundingDinoTransformerEncoder(DeformableDetrTransformerEncoder):
                 text_attention_mask: Tensor = None,
                 pos_text: Tensor = None,
                 text_self_attention_masks: Tensor = None,
-                position_ids: Tensor = None):
+                position_ids: Tensor = None,
+                return_intermediate: bool = False):
         """Forward function of Transformer encoder.
 
         Args:
@@ -204,6 +205,7 @@ class GroundingDinoTransformerEncoder(DeformableDetrTransformerEncoder):
                 mask. Defaults to None.
             position_ids (Tensor, optional): Text position ids.
                 Defaults to None.
+            return_intermediate: if True, return list of outputs per encoder layer
         """
         output = query
         reference_points = self.get_encoder_reference_points(
@@ -225,6 +227,7 @@ class GroundingDinoTransformerEncoder(DeformableDetrTransformerEncoder):
                     exchange_xy=False)
 
         # main process
+        intermediate_outputs = []
         for layer_id, layer in enumerate(self.layers):
             if self.fusion_layers:
                 output, memory_text = self.fusion_layers[layer_id](
@@ -250,7 +253,12 @@ class GroundingDinoTransformerEncoder(DeformableDetrTransformerEncoder):
                 spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index,
                 key_padding_mask=key_padding_mask)
-        return output, memory_text
+            intermediate_outputs.append(output)
+
+        if return_intermediate:
+            return intermediate_outputs, memory_text
+        else:
+            return output, memory_text
 
 
 class GroundingDinoTransformerDecoder(DinoTransformerDecoder):
