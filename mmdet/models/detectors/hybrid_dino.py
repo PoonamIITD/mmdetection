@@ -67,6 +67,9 @@ class HybridDINO(DINO):
             **self.positional_encoding)
         # Encoder from GroundingDINO
         self.encoder = GroundingDinoTransformerEncoder(**self.encoder)
+        # freeze encoder params
+        for p in self.encoder.parameters():
+            p.requires_grad_(False)
         # Decoder from DINO
         self.decoder = DinoTransformerDecoder(**self.decoder)
         self.embed_dims = self.encoder.embed_dims
@@ -459,41 +462,45 @@ class HybridDINO(DINO):
         """Forward through GroundingDINO encoder (with text fusion)."""
         if self.language_model is not None and text_dict is not None:
             text_token_mask = text_dict['text_token_mask']
-            memory, memory_text = self.encoder(
-                query=feat,
-                query_pos=feat_pos,
-                key_padding_mask=feat_mask,
-                spatial_shapes=spatial_shapes,
-                level_start_index=level_start_index,
-                valid_ratios=valid_ratios,
-                memory_text=text_dict['embedded'],
-                text_attention_mask=~text_token_mask,
-                position_ids=text_dict['position_ids'],
-                text_self_attention_masks=text_dict['masks'],
-                return_intermediate=True)
+            with torch.no_grad():
+                memory, memory_text = self.encoder(
+                    query=feat,
+                    query_pos=feat_pos,
+                    key_padding_mask=feat_mask,
+                    spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index,
+                    valid_ratios=valid_ratios,
+                    memory_text=text_dict['embedded'],
+                    text_attention_mask=~text_token_mask,
+                    position_ids=text_dict['position_ids'],
+                    text_self_attention_masks=text_dict['masks'],
+                    return_intermediate=True)
+            memory = memory[-1] 
             # memory is a list [mem_l1, mem_l2, …, mem_L] of all encoder layer ouptut
             return dict(
-                memory=memory[-1],          # final layer output for standard decoder
+                memory=memory,          # final layer output for standard decoder
                 memory_mask=feat_mask,
                 spatial_shapes=spatial_shapes,
                 memory_text=memory_text,
                 text_token_mask=text_token_mask,
-                memory_per_layer=memory
+                memory_per_layer=None
             )
         else:
             # Fallback: vanilla DINO encoder (no text fusion)
-            memory = self.encoder(
-                query=feat,
-                query_pos=feat_pos,
-                key_padding_mask=feat_mask,
-                spatial_shapes=spatial_shapes,
-                level_start_index=level_start_index,
-                valid_ratios=valid_ratios)
+            with torch.no_grad():
+                memory = self.encoder(
+                    query=feat,
+                    query_pos=feat_pos,
+                    key_padding_mask=feat_mask,
+                    spatial_shapes=spatial_shapes,
+                    level_start_index=level_start_index,
+                    valid_ratios=valid_ratios)
+            memory = memory[-1] 
             return dict(
-                memory=memory[-1],
+                memory=memory,
                 memory_mask=feat_mask,
                 spatial_shapes=spatial_shapes,
-                memory_per_layer=memory
+                memory_per_layer=None
             )
 
     def forward_transformer(
