@@ -127,7 +127,7 @@ class HybridDINO(DINO):
         logger = logging.getLogger(__name__)
 
         gdino_ckpt = torch.load(
-            '/home/poonam_rajput/scratch/mmdetection/work_dirs/grounding_dino_swin-l_pretrain_all_rsud/best_coco_bbox_mAP_epoch_19.pth',
+            '/home/poonam_rajput/scratch/mmdetection/checkpoints/GDINO_swin-l_pretrained_rsud_best_mAP_epoch_19.pth',
             map_location='cpu'
         )['state_dict']
         dino_ckpt = torch.load(
@@ -473,15 +473,14 @@ class HybridDINO(DINO):
                     position_ids=text_dict['position_ids'],
                     text_self_attention_masks=text_dict['masks'],
                     return_intermediate=True)
-            memory = memory[-1] 
             # memory is a list [mem_l1, mem_l2, …, mem_L] of all encoder layer ouptut
             return dict(
-                memory=memory,          # final layer output for standard decoder
+                memory=memory[-1],          # final layer output for standard decoder
                 memory_mask=feat_mask,
                 spatial_shapes=spatial_shapes,
                 # memory_text=memory_text,
                 # text_token_mask=text_token_mask,
-                memory_per_layer=None
+                memory_per_layer=memory
             )
         else:
             # Fallback: vanilla DINO encoder (no text fusion)
