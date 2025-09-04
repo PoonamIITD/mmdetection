@@ -127,7 +127,7 @@ class HybridDINO(DINO):
         logger = logging.getLogger(__name__)
 
         gdino_ckpt = torch.load(
-            '/home/poonam_rajput/scratch/mmdetection/checkpoints/GDINO_SWIN-L_pretrained.pth',
+            '/home/poonam_rajput/scratch/mmdetection/work_dirs/grounding_dino_swin-l_pretrain_all_rsud/best_coco_bbox_mAP_epoch_19.pth',
             map_location='cpu'
         )['state_dict']
         dino_ckpt = torch.load(
@@ -390,8 +390,6 @@ class HybridDINO(DINO):
         memory: Tensor,
         memory_mask: Tensor,
         spatial_shapes: Tensor,
-        memory_text: Tensor,
-        text_token_mask: Tensor,
         batch_data_samples: OptSampleList = None,
         memory_per_layer: Optional[List[Tensor]] = None,   # NEW
     ) -> Tuple[Dict]:
@@ -481,8 +479,8 @@ class HybridDINO(DINO):
                 memory=memory,          # final layer output for standard decoder
                 memory_mask=feat_mask,
                 spatial_shapes=spatial_shapes,
-                memory_text=memory_text,
-                text_token_mask=text_token_mask,
+                # memory_text=memory_text,
+                # text_token_mask=text_token_mask,
                 memory_per_layer=None
             )
         else:
@@ -511,7 +509,7 @@ class HybridDINO(DINO):
     ) -> Dict:
         """Hybrid transformer forward: GDINO encoder + DINO decoder."""
         encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
-            img_feats, batch_data_samples)
+            img_feats, batch_data_samples=batch_data_samples)
 
         encoder_outputs_dict = self.forward_encoder(
             **encoder_inputs_dict, text_dict=text_dict)
@@ -600,6 +598,7 @@ class HybridDINO(DINO):
     
     def loss(self, batch_inputs: Tensor,
              batch_data_samples: SampleList) -> Union[dict, list]:
+
         text_prompts = [
             data_samples.text for data_samples in batch_data_samples
         ]
@@ -658,10 +657,11 @@ class HybridDINO(DINO):
                         tokenized, new_tokens_positive)
                     positive_maps.append(positive_map)
                     new_text_prompts.append(caption_string)
-
+        # print(new_text_prompts)
         text_dict = self.language_model(new_text_prompts)
         if self.text_feat_map is not None:
             text_dict['embedded'] = self.text_feat_map(text_dict['embedded'])
+        # print(text_dict['embedded'].shape)
 
         for i, data_samples in enumerate(batch_data_samples):
             positive_map = positive_maps[i].to(
@@ -671,133 +671,133 @@ class HybridDINO(DINO):
             data_samples.gt_instances.text_token_mask = \
                 text_token_mask.unsqueeze(0).repeat(
                     len(positive_map), 1)
+        
+        # for data_samples in batch_data_samples:
+        #     if hasattr(data_samples, 'text'):
+        #         del data_samples.text
+        
         if self.use_autocast:
             with autocast(enabled=True):
                 visual_features = self.extract_feat(batch_inputs)
         else:
             visual_features = self.extract_feat(batch_inputs)
         head_inputs_dict = self.forward_transformer(visual_features, text_dict,
-                                                    batch_data_samples)
+                                                    batch_data_samples=batch_data_samples)
 
         losses = self.bbox_head.loss(
             **head_inputs_dict, batch_data_samples=batch_data_samples)
         return losses
 
-    def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
-        text_prompts = []
-        enhanced_text_prompts = []
-        tokens_positives = []
-        for data_samples in batch_data_samples:
-            text_prompts.append(data_samples.text)
-            if 'caption_prompt' in data_samples:
-                enhanced_text_prompts.append(data_samples.caption_prompt)
-            else:
-                enhanced_text_prompts.append(None)
-            tokens_positives.append(data_samples.get('tokens_positive', None))
+    # def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
+    #     # Fixed vocabulary for inference
+    #     rsud_classes = [
+    #         "person", "rickshaw", "rickshaw van", "auto rickshaw",
+    #         "truck", "pickup truck", "private car", "motorcycle",
+    #         "bicycle", "bus", "micro bus", "covered van", "human hauler"
+    #     ]
 
-        if 'custom_entities' in batch_data_samples[0]:
-            # Assuming that the `custom_entities` flag
-            # inside a batch is always the same. For single image inference
-            custom_entities = batch_data_samples[0].custom_entities
-        else:
-            custom_entities = False
-        if len(text_prompts) == 1:
-            # All the text prompts are the same,
-            # so there is no need to calculate them multiple times.
-            _positive_maps_and_prompts = [
-                self.get_tokens_positive_and_prompts(
-                    text_prompts[0], custom_entities, enhanced_text_prompts[0],
-                    tokens_positives[0])
-            ] * len(batch_inputs)
-        else:
-            _positive_maps_and_prompts = [
-                self.get_tokens_positive_and_prompts(text_prompt,
-                                                     custom_entities,
-                                                     enhanced_text_prompt,
-                                                     tokens_positive)
-                for text_prompt, enhanced_text_prompt, tokens_positive in zip(
-                    text_prompts, enhanced_text_prompts, tokens_positives)
-            ]
-        token_positive_maps, text_prompts, _, entities = zip(
-            *_positive_maps_and_prompts)
+    #     # Always use the same vocabulary across all images
+    #     text_prompt = ", ".join(rsud_classes)
+    #     text_prompts = [text_prompt] * len(batch_inputs)
+    #     entities = [rsud_classes] * len(batch_inputs)  # keep per-sample entities list
 
-        # image feature extraction
-        visual_feats = self.extract_feat(batch_inputs)
 
-        if isinstance(text_prompts[0], list):
-            # chunked text prompts, only bs=1 is supported
-            assert len(batch_inputs) == 1
-            count = 0
-            results_list = []
+    #     # Extract image features
+    #     visual_feats = self.extract_feat(batch_inputs)
 
-            entities = [[item for lst in entities[0] for item in lst]]
+    #     # Encode text features once
+    #     text_dict = self.language_model(list(text_prompts))
+    #     if self.text_feat_map is not None:
+    #         text_dict['embedded'] = self.text_feat_map(text_dict['embedded'])
 
-            for b in range(len(text_prompts[0])):
-                text_prompts_once = [text_prompts[0][b]]
-                token_positive_maps_once = token_positive_maps[0][b]
-                text_dict = self.language_model(text_prompts_once)
-                # text feature map layer
-                if self.text_feat_map is not None:
-                    text_dict['embedded'] = self.text_feat_map(
-                        text_dict['embedded'])
+    #     # # Clean up text field if it exists
+    #     # for data_samples in batch_data_samples:
+    #     #     if hasattr(data_samples, "text"):
+    #     #         del data_samples.text
 
-                batch_data_samples[
-                    0].token_positive_map = token_positive_maps_once
+    #     # Forward through encoder + decoder
+    #     head_inputs_dict = self.forward_transformer(
+    #         visual_feats, text_dict, batch_data_samples)
+    #     results_list = self.bbox_head.predict(
+    #         **head_inputs_dict,
+    #         rescale=rescale,
+    #         batch_data_samples=batch_data_samples
+    #     )
 
-                head_inputs_dict = self.forward_transformer(
-                    copy.deepcopy(visual_feats), text_dict, batch_data_samples)
-                pred_instances = self.bbox_head.predict(
-                    **head_inputs_dict,
-                    rescale=rescale,
-                    batch_data_samples=batch_data_samples)[0]
+    #     # Attach predictions + label names
+    #     for data_sample, pred_instances, entity in zip(
+    #         batch_data_samples, results_list, entities
+    #     ):
+    #         if len(pred_instances) > 0:
+    #             label_names = []
+    #             for labels in pred_instances.labels:
+    #                 if labels >= len(entity):
+    #                     warnings.warn(
+    #                         "Unexpected label index. Check class mapping or try "
+    #                         "setting custom_entities=True."
+    #                     )
+    #                     label_names.append("unobject")
+    #                 else:
+    #                     label_names.append(entity[labels])
+    #             pred_instances.label_names = label_names
+    #         data_sample.pred_instances = pred_instances
 
-                if len(pred_instances) > 0:
-                    pred_instances.labels += count
-                count += len(token_positive_maps_once)
-                results_list.append(pred_instances)
-            results_list = [results_list[0].cat(results_list)]
-            is_rec_tasks = [False] * len(results_list)
-        else:
-            # extract text feats
-            text_dict = self.language_model(list(text_prompts))
-            # text feature map layer
-            if self.text_feat_map is not None:
-                text_dict['embedded'] = self.text_feat_map(
-                    text_dict['embedded'])
+    #     return batch_data_samples
 
-            is_rec_tasks = []
-            for i, data_samples in enumerate(batch_data_samples):
-                if token_positive_maps[i] is not None:
-                    is_rec_tasks.append(False)
-                else:
-                    is_rec_tasks.append(True)
-                data_samples.token_positive_map = token_positive_maps[i]
+    def predict(self,
+            batch_inputs: Tensor,
+            batch_data_samples: SampleList,
+            rescale: bool = True) -> SampleList:
+        """Predict results from a batch of inputs and data samples with post-
+        processing.
 
-            head_inputs_dict = self.forward_transformer(
-                visual_feats, text_dict, batch_data_samples)
-            results_list = self.bbox_head.predict(
-                **head_inputs_dict,
-                rescale=rescale,
-                batch_data_samples=batch_data_samples)
+        Args:
+            batch_inputs (Tensor): Inputs, has shape (bs, dim, H, W).
+            batch_data_samples (List[:obj:`DetDataSample`]): The batch
+                data samples. It usually includes information such
+                as `gt_instance` or `gt_panoptic_seg` or `gt_sem_seg`.
+            rescale (bool): Whether to rescale the results.
+                Defaults to True.
 
-        for data_sample, pred_instances, entity, is_rec_task in zip(
-                batch_data_samples, results_list, entities, is_rec_tasks):
-            if len(pred_instances) > 0:
-                label_names = []
-                for labels in pred_instances.labels:
-                    if is_rec_task:
-                        label_names.append(entity)
-                        continue
-                    if labels >= len(entity):
-                        warnings.warn(
-                            'The unexpected output indicates an issue with '
-                            'named entity recognition. You can try '
-                            'setting custom_entities=True and running '
-                            'again to see if it helps.')
-                        label_names.append('unobject')
-                    else:
-                        label_names.append(entity[labels])
-                # for visualization
-                pred_instances.label_names = label_names
-            data_sample.pred_instances = pred_instances
+        Returns:
+            list[:obj:`DetDataSample`]: Detection results of the input images.
+            Each DetDataSample usually contain 'pred_instances'. And the
+            `pred_instances` usually contains following keys.
+
+            - scores (Tensor): Classification scores, has a shape
+              (num_instance, )
+            - labels (Tensor): Labels of bboxes, has a shape
+              (num_instances, ).
+            - bboxes (Tensor): Has a shape (num_instances, 4),
+              the last dimension 4 arrange as (x1, y1, x2, y2).
+        """
+        # Extract image features
+        img_feats = self.extract_feat(batch_inputs)
+        rsud_classes = (
+            "person", "rickshaw", "rickshaw van", "auto rickshaw",
+            "truck", "pickup truck", "private car", "motorcycle",
+            "bicycle", "bus", "micro bus", "covered van", "human hauler"
+        )
+
+        # Keep tuples for debugging/consistency
+        text_prompts = [rsud_classes] * len(batch_inputs)
+        entities = [list(rsud_classes)] * len(batch_inputs)
+
+        # 🔹 Convert tuples into the dotted string format for tokenizer
+        text_prompts_for_lm = [
+            ". ".join(p) + ". " for p in text_prompts
+        ]
+
+        # Encode text features once
+        text_dict = self.language_model(text_prompts_for_lm)
+        if self.text_feat_map is not None:
+            text_dict['embedded'] = self.text_feat_map(text_dict['embedded'])
+        # print(text_dict['embedded'].shape)
+        head_inputs_dict = self.forward_transformer(img_feats,text_dict,batch_data_samples=batch_data_samples)
+        results_list = self.bbox_head.predict(
+            **head_inputs_dict,
+            rescale=rescale,
+            batch_data_samples=batch_data_samples)
+        batch_data_samples = self.add_pred_to_datasample(
+            batch_data_samples, results_list)
         return batch_data_samples

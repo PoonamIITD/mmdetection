@@ -184,9 +184,27 @@ train_pipeline = [
                    'custom_entities'))
 ]
 
+test_pipeline = [
+    dict(
+        type='LoadImageFromFile', backend_args=None,
+        imdecode_backend='pillow'),
+    dict(
+        type='FixScaleResize',
+        scale=(800, 1333),
+        keep_ratio=True,
+        backend='pillow'),
+    dict(type='LoadAnnotations', with_bbox=True),
+    dict(
+        type='PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape',
+                   'scale_factor', 'text', 'custom_entities',
+                   'tokens_positive'))
+]
+
+
 train_dataloader = dict(
-    batch_size=2,
-    num_workers=2,
+    batch_size=4,
+    num_workers=4,
     persistent_workers=True,
     dataset=dict(
         _delete_=True,
@@ -201,9 +219,11 @@ train_dataloader = dict(
 
 val_dataloader = dict(
     dataset=dict(
+        _delete_=True,
         type='CocoDataset',
         metainfo=metainfo,
         data_root=data_root,
+        pipeline=test_pipeline,
         ann_file='annotations/instances_val2017.json',
         data_prefix=dict(img='images/val')))
 
@@ -212,7 +232,7 @@ test_dataloader = val_dataloader
 val_evaluator = dict(ann_file=data_root + 'annotations/instances_val2017.json')
 test_evaluator = val_evaluator
 
-max_epoch = 10
+max_epoch = 20
 
 default_hooks = dict(
     checkpoint=dict(interval=1, max_keep_ckpts=1, save_best='coco/bbox_mAP', rule='greater'),
