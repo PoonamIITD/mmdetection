@@ -69,10 +69,11 @@ class DINOHead(DeformableDETRHead):
             batch_gt_instances.append(data_sample.gt_instances)
 
         outs = self(hidden_states, references)
+        # outs_all_layers = outs + (enc_outputs_class, enc_outputs_coord)
         loss_inputs = outs + (enc_outputs_class, enc_outputs_coord,
                               batch_gt_instances, batch_img_metas, dn_meta)
         losses = self.loss_by_feat(*loss_inputs)
-        return losses
+        return losses #, outs_all_layers
 
     def loss_by_feat(
         self,

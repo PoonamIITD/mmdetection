@@ -203,8 +203,8 @@ test_pipeline = [
 
 
 train_dataloader = dict(
-    batch_size=4,
-    num_workers=4,
+    batch_size=2,
+    num_workers=2,
     persistent_workers=True,
     dataset=dict(
         _delete_=True,
@@ -224,15 +224,15 @@ val_dataloader = dict(
         metainfo=metainfo,
         data_root=data_root,
         pipeline=test_pipeline,
-        ann_file='annotations/instances_val2017.json',
+        ann_file='annotations/instances_val2017_10samples.json',
         data_prefix=dict(img='images/val')))
 
 test_dataloader = val_dataloader
 
-val_evaluator = dict(ann_file=data_root + 'annotations/instances_val2017.json')
+val_evaluator = dict(ann_file=data_root + 'annotations/instances_val2017_10samples.json')
 test_evaluator = val_evaluator
 
-max_epoch = 20
+max_epoch = 2
 
 default_hooks = dict(
     checkpoint=dict(interval=1, max_keep_ckpts=1, save_best='coco/bbox_mAP', rule='greater'),
@@ -260,7 +260,7 @@ optim_wrapper = dict(
             'neck': dict(lr_mult=0.0)
         }))
 
-model_wrapper_cfg = dict(
-    type='MMDistributedDataParallel',
-    find_unused_parameters=True
-)
+# model_wrapper_cfg = dict(
+#     type='MMDistributedDataParallel',
+#     find_unused_parameters=True
+# )

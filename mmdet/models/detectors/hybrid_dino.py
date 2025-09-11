@@ -63,13 +63,10 @@ class HybridDINO(DINO):
     def _init_layers(self) -> None:
         """Use GroundingDINO encoder and DINO decoder."""
         # Positional encoding
-        self.positional_encoding = SinePositionalEncoding(
-            **self.positional_encoding)
+        self.positional_encoding = SinePositionalEncoding(**self.positional_encoding)
         # Encoder from GroundingDINO
         self.encoder = GroundingDinoTransformerEncoder(**self.encoder)
-        # freeze encoder params
-        for p in self.encoder.parameters():
-            p.requires_grad_(False)
+
         # Decoder from DINO
         self.decoder = DinoTransformerDecoder(**self.decoder)
         self.embed_dims = self.encoder.embed_dims
@@ -86,45 +83,32 @@ class HybridDINO(DINO):
         self.memory_trans_fc = nn.Linear(self.embed_dims, self.embed_dims)
         self.memory_trans_norm = nn.LayerNorm(self.embed_dims)
 
-        # Optional: add language model if needed (for encoder multimodal fusion)
-        if self.language_model_cfg is not None:
-            self.language_model = MODELS.build(self.language_model_cfg)
-            self.text_feat_map = nn.Linear(
-                self.language_model.language_backbone.body.language_dim,
-                self.embed_dims,
-                bias=True)
-            for name, param in self.language_model.named_parameters():
-                if "encoder.layers.5" in name or "encoder.layers.6" in name:  # example
-                    param.requires_grad = False
-        else:
-            self.language_model = None
-            self.text_feat_map = None
+        self.language_model = MODELS.build(self.language_model_cfg)
+        self.text_feat_map = nn.Linear(
+            self.language_model.language_backbone.body.language_dim,
+            self.embed_dims,
+            bias=True)
+        
+        for param in self.backbone.parameters():
+            param.requires_grad = False
 
-    # def init_weights(self):
-    #     """Initialize HybridDINO with both DINO + GDINO checkpoints."""
-    #     import logging
-    #     logger = logging.getLogger(__name__)
+        for param in self.language_model.parameters():
+            param.requires_grad = False
 
-    #     gdino_ckpt = torch.load('path/to/gdino_swinl.pth', map_location='cpu')['state_dict']
-    #     dino_ckpt = torch.load('path/to/dino_swinl.pth', map_location='cpu')['state_dict']
-
-    #     # Backbone + Encoder from GDINO
-    #     gdino_filtered = {k: v for k, v in gdino_ckpt.items()
-    #                     if any(s in k for s in ['backbone', 'encoder'])}
-    #     missing, unexpected = self.load_state_dict(gdino_filtered, strict=False)
-    #     logger.info(f"[GDINO] Loaded backbone+encoder | missing={len(missing)}, unexpected={len(unexpected)}")
-
-    #     # Decoder + Head from DINO
-    #     dino_filtered = {k: v for k, v in dino_ckpt.items()
-    #                     if any(s in k for s in ['decoder', 'bbox_head'])}
-    #     missing, unexpected = self.load_state_dict(dino_filtered, strict=False)
-    #     logger.info(f"[DINO] Loaded decoder+head | missing={len(missing)}, unexpected={len(unexpected)}")
+        for param in self.text_feat_map.parameters():
+            param.requires_grad = False
+        
+        for param in self.positional_encoding.parameters():
+            param.requires_grad = False
+        
+        self.level_embed.requires_grad = False
 
 
     def init_weights(self):
         """Initialize HybridDINO with GDINO (backbone+encoder) + DINO (decoder+head)."""
-        import logging
-        logger = logging.getLogger(__name__)
+        from mmengine import MMLogger
+
+        logger = MMLogger.get_current_instance()
 
         gdino_ckpt = torch.load(
             '/home/poonam_rajput/scratch/mmdetection/checkpoints/GDINO_swin-l_pretrained_rsud_best_mAP_epoch_19.pth',
@@ -135,14 +119,32 @@ class HybridDINO(DINO):
             map_location='cpu'
         )['state_dict']
 
+        # -------- GDINO: text_feat_map --------
+        if hasattr(self, "text_feat_map"):
+            text_feat_map_weights = {
+                k.replace("text_feat_map.", ""): v
+                for k, v in gdino_ckpt.items() if k.startswith("text_feat_map.")
+            }
+
+            missing, unexpected = self.text_feat_map.load_state_dict(text_feat_map_weights, strict=True)
+            # print(self.backbone.state_dict().keys())
+            # print([k for k in gdino_ckpt.keys() if k.startswith("backbone.")])
+
+            logger.info(f"[GDINO] Loaded text_feat_map | missing={len(missing)}, unexpected={len(unexpected)}")
+        
         # -------- GDINO: backbone --------
         if hasattr(self, "backbone"):
             backbone_weights = {
                 k.replace("backbone.", ""): v
                 for k, v in gdino_ckpt.items() if k.startswith("backbone.")
             }
-            missing, unexpected = self.backbone.load_state_dict(backbone_weights, strict=False)
+
+            missing, unexpected = self.backbone.load_state_dict(backbone_weights, strict=True)
+            # print(self.backbone.state_dict().keys())
+            # print([k for k in gdino_ckpt.keys() if k.startswith("backbone.")])
+
             logger.info(f"[GDINO] Loaded backbone | missing={len(missing)}, unexpected={len(unexpected)}")
+
 
          # -------- GDINO: neck --------
         if hasattr(self, "neck"):
@@ -150,8 +152,26 @@ class HybridDINO(DINO):
                 k.replace("neck.", ""): v
                 for k, v in gdino_ckpt.items() if k.startswith("neck.")
             }
-            missing, unexpected = self.neck.load_state_dict(neck_weights, strict=False)
+            missing, unexpected = self.neck.load_state_dict(neck_weights, strict=True)
             logger.info(f"[GDINO] Loaded neck | missing={len(missing)}, unexpected={len(unexpected)}")
+
+        # -------- GDINO: positional_encoding --------
+        if hasattr(self, "positional_encoding"):
+            positional_encoding_weights = {
+                k.replace("positional_encoding.", ""): v
+                for k, v in gdino_ckpt.items() if k.startswith("positional_encoding.")
+            }
+
+            missing, unexpected = self.positional_encoding.load_state_dict(positional_encoding_weights, strict=True)
+            logger.info(f"[GDINO] Loaded positional_encoding | missing={len(missing)}, unexpected={len(unexpected)}")
+
+        # -------- GDINO: level_embed --------
+        if "level_embed" in gdino_ckpt:
+            with torch.no_grad():
+                self.level_embed.copy_(gdino_ckpt["level_embed"])
+            logger.info("[GDINO] Loaded level_embed from checkpoint")
+        else:
+            logger.warning("[GDINO] level_embed not found in checkpoint — using random init")
 
         # -------- GDINO: encoder --------
         if hasattr(self, "encoder"):
@@ -159,8 +179,35 @@ class HybridDINO(DINO):
                 k.replace("encoder.", ""): v
                 for k, v in gdino_ckpt.items() if k.startswith("encoder.")
             }
-            missing, unexpected = self.encoder.load_state_dict(encoder_weights, strict=False)
+            missing, unexpected = self.encoder.load_state_dict(encoder_weights, strict=True)
             logger.info(f"[GDINO] Loaded encoder | missing={len(missing)}, unexpected={len(unexpected)}")
+
+        if hasattr(self, "query_embedding"):
+            query_embedding_weights = {
+                k.replace("query_embedding.", ""): v
+                for k, v in dino_ckpt.items() if k.startswith("query_embedding.")
+            }
+
+            missing, unexpected = self.query_embedding.load_state_dict(query_embedding_weights, strict=True)
+            logger.info(f"[DINO] Loaded query_embedding | missing={len(missing)}, unexpected={len(unexpected)}")
+
+        if hasattr(self, "memory_trans_fc"):
+            memory_trans_fc_weights = {
+                k.replace("memory_trans_fc.", ""): v
+                for k, v in dino_ckpt.items() if k.startswith("memory_trans_fc.")
+            }
+
+            missing, unexpected = self.memory_trans_fc.load_state_dict(memory_trans_fc_weights, strict=True)
+            logger.info(f"[DINO] Loaded memory_trans_fc | missing={len(missing)}, unexpected={len(unexpected)}")
+
+        if hasattr(self, "memory_trans_norm"):
+            memory_trans_norm_weights = {
+                k.replace("memory_trans_norm.", ""): v
+                for k, v in dino_ckpt.items() if k.startswith("memory_trans_norm.")
+            }
+
+            missing, unexpected = self.memory_trans_norm.load_state_dict(memory_trans_norm_weights, strict=True)
+            logger.info(f"[DINO] Loaded memory_trans_norm | missing={len(missing)}, unexpected={len(unexpected)}")
 
         # -------- DINO: decoder --------
         if hasattr(self, "decoder"):
@@ -168,7 +215,7 @@ class HybridDINO(DINO):
                 k.replace("decoder.", ""): v
                 for k, v in dino_ckpt.items() if k.startswith("decoder.")
             }
-            missing, unexpected = self.decoder.load_state_dict(decoder_weights, strict=False)
+            missing, unexpected = self.decoder.load_state_dict(decoder_weights, strict=True)
             logger.info(f"[DINO] Loaded decoder | missing={len(missing)}, unexpected={len(unexpected)}")
 
         # -------- DINO: bbox_head --------
@@ -179,6 +226,8 @@ class HybridDINO(DINO):
             }
             missing, unexpected = self.bbox_head.load_state_dict(head_weights, strict=False)
             logger.info(f"[DINO] Loaded bbox_head | missing={len(missing)}, unexpected={len(unexpected)}")
+
+        
 
     def to_enhance_text_prompts(self, original_caption, enhanced_text_prompts):
         caption_string = ''
@@ -385,6 +434,60 @@ class HybridDINO(DINO):
             positive_map_chunked, \
             entities_chunked
 
+    def forward_transformer(
+        self,
+        img_feats: Tuple[Tensor],
+        text_dict: Optional[Dict] = None,
+        batch_data_samples: OptSampleList = None,
+    ) -> Dict:
+        """Hybrid transformer forward: GDINO encoder + DINO decoder."""
+        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
+            img_feats, batch_data_samples=batch_data_samples)
+
+        encoder_outputs_dict = self.forward_encoder(
+            **encoder_inputs_dict, text_dict=text_dict)
+
+        tmp_dec_in, head_inputs_dict = self.pre_decoder(
+            **encoder_outputs_dict, batch_data_samples=batch_data_samples)
+        decoder_inputs_dict.update(tmp_dec_in)
+
+        # decoder is pure DINO
+        decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
+        head_inputs_dict.update(decoder_outputs_dict)
+        return head_inputs_dict
+    
+    def forward_encoder(self,
+                        feat: Tensor,
+                        feat_mask: Tensor,
+                        feat_pos: Tensor,
+                        spatial_shapes: Tensor,
+                        level_start_index: Tensor,
+                        valid_ratios: Tensor,
+                        text_dict: Optional[Dict] = None) -> Dict:
+        """Forward through GroundingDINO encoder (with text fusion)."""
+        text_token_mask = text_dict['text_token_mask']
+        memory, memory_text = self.encoder(
+            query=feat,
+            query_pos=feat_pos,
+            key_padding_mask=feat_mask,
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            valid_ratios=valid_ratios,
+            memory_text=text_dict['embedded'],
+            text_attention_mask=~text_token_mask,
+            position_ids=text_dict['position_ids'],
+            text_self_attention_masks=text_dict['masks'],
+            return_intermediate=True)
+        # memory is a list [mem_l1, mem_l2, …, mem_L] of all encoder layer ouptut
+        return dict(
+            memory=memory[-1],          # final layer output for standard decoder
+            memory_mask=feat_mask,
+            spatial_shapes=spatial_shapes,
+            # memory_text=memory_text,
+            # text_token_mask=text_token_mask,
+            memory_per_layer=memory
+        )
+
     def pre_decoder(
         self,
         memory: Tensor,
@@ -448,79 +551,6 @@ class HybridDINO(DINO):
             enc_outputs_coord=topk_coords,
             dn_meta=dn_meta) if self.training else dict()
         return decoder_inputs_dict, head_inputs_dict
-    
-    def forward_encoder(self,
-                        feat: Tensor,
-                        feat_mask: Tensor,
-                        feat_pos: Tensor,
-                        spatial_shapes: Tensor,
-                        level_start_index: Tensor,
-                        valid_ratios: Tensor,
-                        text_dict: Optional[Dict] = None) -> Dict:
-        """Forward through GroundingDINO encoder (with text fusion)."""
-        if self.language_model is not None and text_dict is not None:
-            text_token_mask = text_dict['text_token_mask']
-            with torch.no_grad():
-                memory, memory_text = self.encoder(
-                    query=feat,
-                    query_pos=feat_pos,
-                    key_padding_mask=feat_mask,
-                    spatial_shapes=spatial_shapes,
-                    level_start_index=level_start_index,
-                    valid_ratios=valid_ratios,
-                    memory_text=text_dict['embedded'],
-                    text_attention_mask=~text_token_mask,
-                    position_ids=text_dict['position_ids'],
-                    text_self_attention_masks=text_dict['masks'],
-                    return_intermediate=True)
-            # memory is a list [mem_l1, mem_l2, …, mem_L] of all encoder layer ouptut
-            return dict(
-                memory=memory[-1],          # final layer output for standard decoder
-                memory_mask=feat_mask,
-                spatial_shapes=spatial_shapes,
-                # memory_text=memory_text,
-                # text_token_mask=text_token_mask,
-                memory_per_layer=memory
-            )
-        else:
-            # Fallback: vanilla DINO encoder (no text fusion)
-            with torch.no_grad():
-                memory = self.encoder(
-                    query=feat,
-                    query_pos=feat_pos,
-                    key_padding_mask=feat_mask,
-                    spatial_shapes=spatial_shapes,
-                    level_start_index=level_start_index,
-                    valid_ratios=valid_ratios)
-            memory = memory[-1] 
-            return dict(
-                memory=memory,
-                memory_mask=feat_mask,
-                spatial_shapes=spatial_shapes,
-                memory_per_layer=None
-            )
-
-    def forward_transformer(
-        self,
-        img_feats: Tuple[Tensor],
-        text_dict: Optional[Dict] = None,
-        batch_data_samples: OptSampleList = None,
-    ) -> Dict:
-        """Hybrid transformer forward: GDINO encoder + DINO decoder."""
-        encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
-            img_feats, batch_data_samples=batch_data_samples)
-
-        encoder_outputs_dict = self.forward_encoder(
-            **encoder_inputs_dict, text_dict=text_dict)
-
-        tmp_dec_in, head_inputs_dict = self.pre_decoder(
-            **encoder_outputs_dict, batch_data_samples=batch_data_samples)
-        decoder_inputs_dict.update(tmp_dec_in)
-
-        # decoder is pure DINO
-        decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
-        head_inputs_dict.update(decoder_outputs_dict)
-        return head_inputs_dict
 
     def forward_decoder(self,
                         query: Tensor,
@@ -683,65 +713,17 @@ class HybridDINO(DINO):
         head_inputs_dict = self.forward_transformer(visual_features, text_dict,
                                                     batch_data_samples=batch_data_samples)
 
+        # 2. Save reference points visualization
+        # if "references" in head_inputs_dict:
+        #     self._save_ref_points(
+        #         head_inputs_dict,
+        #         batch_inputs=batch_inputs,
+        #         batch_data_samples=batch_data_samples)
+
         losses = self.bbox_head.loss(
             **head_inputs_dict, batch_data_samples=batch_data_samples)
+        
         return losses
-
-    # def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
-    #     # Fixed vocabulary for inference
-    #     rsud_classes = [
-    #         "person", "rickshaw", "rickshaw van", "auto rickshaw",
-    #         "truck", "pickup truck", "private car", "motorcycle",
-    #         "bicycle", "bus", "micro bus", "covered van", "human hauler"
-    #     ]
-
-    #     # Always use the same vocabulary across all images
-    #     text_prompt = ", ".join(rsud_classes)
-    #     text_prompts = [text_prompt] * len(batch_inputs)
-    #     entities = [rsud_classes] * len(batch_inputs)  # keep per-sample entities list
-
-
-    #     # Extract image features
-    #     visual_feats = self.extract_feat(batch_inputs)
-
-    #     # Encode text features once
-    #     text_dict = self.language_model(list(text_prompts))
-    #     if self.text_feat_map is not None:
-    #         text_dict['embedded'] = self.text_feat_map(text_dict['embedded'])
-
-    #     # # Clean up text field if it exists
-    #     # for data_samples in batch_data_samples:
-    #     #     if hasattr(data_samples, "text"):
-    #     #         del data_samples.text
-
-    #     # Forward through encoder + decoder
-    #     head_inputs_dict = self.forward_transformer(
-    #         visual_feats, text_dict, batch_data_samples)
-    #     results_list = self.bbox_head.predict(
-    #         **head_inputs_dict,
-    #         rescale=rescale,
-    #         batch_data_samples=batch_data_samples
-    #     )
-
-    #     # Attach predictions + label names
-    #     for data_sample, pred_instances, entity in zip(
-    #         batch_data_samples, results_list, entities
-    #     ):
-    #         if len(pred_instances) > 0:
-    #             label_names = []
-    #             for labels in pred_instances.labels:
-    #                 if labels >= len(entity):
-    #                     warnings.warn(
-    #                         "Unexpected label index. Check class mapping or try "
-    #                         "setting custom_entities=True."
-    #                     )
-    #                     label_names.append("unobject")
-    #                 else:
-    #                     label_names.append(entity[labels])
-    #             pred_instances.label_names = label_names
-    #         data_sample.pred_instances = pred_instances
-
-    #     return batch_data_samples
 
     def predict(self,
             batch_inputs: Tensor,
@@ -791,12 +773,78 @@ class HybridDINO(DINO):
         text_dict = self.language_model(text_prompts_for_lm)
         if self.text_feat_map is not None:
             text_dict['embedded'] = self.text_feat_map(text_dict['embedded'])
-        # print(text_dict['embedded'].shape)
+        
         head_inputs_dict = self.forward_transformer(img_feats,text_dict,batch_data_samples=batch_data_samples)
+        
         results_list = self.bbox_head.predict(
             **head_inputs_dict,
             rescale=rescale,
             batch_data_samples=batch_data_samples)
+        
         batch_data_samples = self.add_pred_to_datasample(
             batch_data_samples, results_list)
         return batch_data_samples
+
+
+    def _save_ref_points(self, head_inputs_dict, batch_inputs, batch_data_samples,
+                     out_dir="refpoints_vis"):
+        import os
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Extract references
+        enc_ref = head_inputs_dict["enc_outputs_coord"]      # [bs, num_queries, 4]
+        dec_refs = head_inputs_dict["references"]            # list of [bs, num_queries, 4]
+
+        # Recover denormalized images
+        imgs = []
+        for img_tensor, data_sample in zip(batch_inputs, batch_data_samples):
+            img_norm_cfg = data_sample.metainfo.get("img_norm_cfg", None)
+            if img_norm_cfg is not None:
+                img = self._denormalize(img_tensor, img_norm_cfg)
+            else:
+                img = img_tensor.detach().cpu().permute(1, 2, 0).numpy()
+                img = (img * 255).clip(0, 255).astype(np.uint8)
+            imgs.append(img)
+
+        # Total panels = 1 (encoder) + len(decoder layers)
+        total_layers = 1 + len(dec_refs)
+        colors = plt.cm.get_cmap("tab10", total_layers)
+
+        for b, (img, data_sample) in enumerate(zip(imgs, batch_data_samples)):
+            img_meta = data_sample.metainfo
+            h, w = img_meta["img_shape"][:2]
+
+            fig, axes = plt.subplots(1, total_layers, figsize=(5 * total_layers, 5))
+            if total_layers == 1:
+                axes = [axes]
+
+            # -------- Pre-decoder (encoder outputs) --------
+            enc = enc_ref[b].detach().cpu().numpy()
+            cx, cy = enc[:, 0] * w, enc[:, 1] * h
+            axes[0].imshow(img)
+            axes[0].scatter(cx, cy, s=10, c=[colors(0)], alpha=0.6)
+            axes[0].set_title("Pre-decoder (Encoder)")
+            axes[0].axis("off")
+
+            # -------- Decoder layers --------
+            for i, ref in enumerate(dec_refs):
+                ref = ref[b].detach().cpu().numpy()
+                cx, cy = ref[:, 0] * w, ref[:, 1] * h
+                axes[i + 1].imshow(img)
+                axes[i + 1].scatter(cx, cy, s=10, c=[colors(i + 1)], alpha=0.6)
+                axes[i + 1].set_title(f"Decoder Layer {i}")
+                axes[i + 1].axis("off")
+
+            img_id = data_sample.metainfo.get("img_id", f"sample{b}")
+            plt.savefig(os.path.join(out_dir, f"refpoints_{img_id}.png"))
+            plt.close(fig)
+
+
+    def _denormalize(img):
+        import numpy as np
+        img = img.detach().cpu().numpy()
+        img = (img.transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+        return img

@@ -71,6 +71,7 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
         """
         intermediate = []
         intermediate_reference_points = [reference_points]
+
         if memory_per_layer is not None:
             # Support list of tensors OR stacked tensor
             num_enc_layers = (len(memory_per_layer) 
@@ -79,9 +80,12 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
             assert num_enc_layers == len(self.layers), \
                 f"Decoder has {len(self.layers)} layers, " \
                 f"but got {num_enc_layers} encoder outputs"
+
         for lid, layer in enumerate(self.layers):
+
             # Pick encoder output
             layer_value = value if memory_per_layer is None else memory_per_layer[lid]
+
             if reference_points.shape[-1] == 4:
                 reference_points_input = \
                     reference_points[:, :, None] * torch.cat(
