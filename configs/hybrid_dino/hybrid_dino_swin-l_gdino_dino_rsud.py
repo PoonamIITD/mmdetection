@@ -1,7 +1,9 @@
-_base_ = [
-    '../_base_/datasets/coco_detection.py',
-    '../_base_/schedules/schedule_1x.py', '../_base_/default_runtime.py'
-]
+# _base_ = [
+#     '../_base_/datasets/coco_detection.py',
+#     '../_base_/schedules/schedule_1x.py', '../_base_/default_runtime.py'
+# ]
+
+_base_ = '../mm_grounding_dino/grounding_dino_swin-t_pretrain_obj365.py'
 
 data_root = '/home/poonam_rajput/scratch/dataset/RSUD_dataset/'
 class_name = ('person','rickshaw','rickshaw van','auto rickshaw','truck','pickup truck','private car','motorcycle','bicycle','bus','micro bus','covered van','human hauler', )
@@ -11,6 +13,7 @@ num_classes = len(class_name)
 lang_model_name = 'bert-base-uncased'
 num_levels = 5
 model = dict(
+    _delete_=True,
     type='HybridDINO',
     use_autocast=True,
     num_feature_levels=num_levels,
@@ -219,17 +222,17 @@ train_dataloader = dict(
 
 val_dataloader = dict(
     dataset=dict(
-        _delete_=True,
-        type='CocoDataset',
+        # _delete_=True,
+        # type='CocoDataset',
         metainfo=metainfo,
         data_root=data_root,
         pipeline=test_pipeline,
-        ann_file='annotations/instances_val2017_10samples.json',
-        data_prefix=dict(img='images/val')))
+        ann_file='annotations/instances_test2017.json',
+        data_prefix=dict(img='images/test')))
 
 test_dataloader = val_dataloader
 
-val_evaluator = dict(ann_file=data_root + 'annotations/instances_val2017_10samples.json')
+val_evaluator = dict(ann_file=data_root + 'annotations/instances_test2017.json')
 test_evaluator = val_evaluator
 
 max_epoch = 2
@@ -260,7 +263,3 @@ optim_wrapper = dict(
             'neck': dict(lr_mult=0.0)
         }))
 
-# model_wrapper_cfg = dict(
-#     type='MMDistributedDataParallel',
-#     find_unused_parameters=True
-# )
