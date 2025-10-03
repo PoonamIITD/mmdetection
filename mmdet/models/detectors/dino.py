@@ -11,7 +11,9 @@ from mmdet.utils import OptConfigType
 from ..layers import (CdnQueryGenerator, DeformableDetrTransformerEncoder,
                       DinoTransformerDecoder, SinePositionalEncoding)
 from .deformable_detr import DeformableDETR, MultiScaleDeformableAttention
-
+from ..layers.transformer.grounding_dino_layers import (
+    GroundingDinoTransformerEncoder
+)
 
 @MODELS.register_module()
 class DINO(DeformableDETR):
@@ -26,7 +28,9 @@ class DINO(DeformableDETR):
             query generator. Defaults to `None`.
     """
 
-    def __init__(self, *args, dn_cfg: OptConfigType = None, **kwargs) -> None:
+    def __init__(self, gdino_ratio = 0.0, *args, dn_cfg: OptConfigType = None, **kwargs) -> None:
+        
+
         super().__init__(*args, **kwargs)
         assert self.as_two_stage, 'as_two_stage must be True for DINO'
         assert self.with_box_refine, 'with_box_refine must be True for DINO'
@@ -42,6 +46,21 @@ class DINO(DeformableDETR):
             dn_cfg['embed_dims'] = self.embed_dims
             dn_cfg['num_matching_queries'] = self.num_queries
         self.dn_query_generator = CdnQueryGenerator(**dn_cfg)
+        # gdino_embed_dir = 'dino_embeddings' 
+        # self.gdino_ratio = gdino_ratio
+        # self.dino_cache = {} 
+
+        # import os 
+        # for fname in os.listdir(gdino_embed_dir): 
+        #     if fname.endswith(".pt"): 
+        #         key = os.path.splitext(fname)[0] # filename without extension 
+        #         self.dino_cache[key] = torch.load( os.path.join(gdino_embed_dir, fname), map_location="cpu") 
+                
+                
+        # import logging 
+        # logging.basicConfig(level=logging.INFO) 
+        # logger = logging.getLogger("Loading DINO embeddings") 
+        # logger.info(f"[DINO] Loaded {len(self.dino_cache)} DINO embeddings into cache")  
 
     def _init_layers(self) -> None:
         """Initialize layers except for backbone, neck and bbox_head."""
@@ -66,6 +85,20 @@ class DINO(DeformableDETR):
         self.memory_trans_fc = nn.Linear(self.embed_dims, self.embed_dims)
         self.memory_trans_norm = nn.LayerNorm(self.embed_dims)
 
+        # for param in self.backbone.parameters():
+        #     param.requires_grad = False
+
+        # for param in self.neck.parameters():
+        #     param.requires_grad = False
+        
+        # for param in self.encoder.parameters():
+        #     param.requires_grad = False
+
+        # for param in self.positional_encoding.parameters():
+        #     param.requires_grad = False
+        
+        # self.level_embed.requires_grad = False
+
     def init_weights(self) -> None:
         """Initialize weights for Transformer and other components."""
         super(DeformableDETR, self).init_weights()
@@ -79,7 +112,151 @@ class DINO(DeformableDETR):
         nn.init.xavier_uniform_(self.memory_trans_fc.weight)
         nn.init.xavier_uniform_(self.query_embedding.weight)
         normal_(self.level_embed)
+        
+    # def init_weights(self):
 
+    #     super(DeformableDETR, self).init_weights()
+    #     from mmengine import MMLogger
+
+    #     logger = MMLogger.get_current_instance()
+
+    #     # gdino_ckpt = torch.load(
+    #     #     '/home/poonam_rajput/scratch/mmdetection/checkpoints/GDINO_swin-l_pretrained_rsud_best_mAP_epoch_19.pth',
+    #     #     map_location='cpu'
+    #     # )['state_dict']
+    #     dino_ckpt = torch.load(
+    #         '/home/poonam_rajput/scratch/mmdetection/checkpoints/DINO-swin-L_pretrained_rsud_best_epoch_16.pth',
+    #         map_location='cpu'
+    #     )['state_dict']
+        
+    #     # # -------- GDINO: encoder --------
+    #     # if hasattr(self, "encoder"):
+    #     #     gdino_encoder_weights = {
+    #     #         k.replace("encoder.", ""): v
+    #     #         for k, v in gdino_ckpt.items() if k.startswith("encoder.")
+    #     #     }
+
+    #     #     missing, unexpected = self.gdino_encoder.load_state_dict(gdino_encoder_weights, strict=True)
+    #     #     # print(self.backbone.state_dict().keys())
+    #     #     # print([k for k in gdino_ckpt.keys() if k.startswith("backbone.")])
+
+    #     #     logger.info(f"[GDINO] Loaded encoder | missing={len(missing)}, unexpected={len(unexpected)}")
+
+    #     # -------- DINO: backbone --------
+    #     if hasattr(self, "backbone"):
+    #         backbone_weights = {
+    #             k.replace("backbone.", ""): v
+    #             for k, v in dino_ckpt.items() if k.startswith("backbone.")
+    #         }
+
+    #         missing, unexpected = self.backbone.load_state_dict(backbone_weights, strict=True)
+    #         # print(self.backbone.state_dict().keys())
+    #         # print([k for k in gdino_ckpt.keys() if k.startswith("backbone.")])
+
+    #         logger.info(f"[DINO] Loaded backbone | missing={len(missing)}, unexpected={len(unexpected)}")
+
+
+    #      # -------- DINO: neck --------
+    #     if hasattr(self, "neck"):
+    #         neck_weights = {
+    #             k.replace("neck.", ""): v
+    #             for k, v in dino_ckpt.items() if k.startswith("neck.")
+    #         }
+    #         missing, unexpected = self.neck.load_state_dict(neck_weights, strict=True)
+    #         logger.info(f"[DINO] Loaded neck | missing={len(missing)}, unexpected={len(unexpected)}")
+
+    #     # -------- DINO: positional_encoding --------
+    #     if hasattr(self, "positional_encoding"):
+    #         positional_encoding_weights = {
+    #             k.replace("positional_encoding.", ""): v
+    #             for k, v in dino_ckpt.items() if k.startswith("positional_encoding.")
+    #         }
+
+    #         missing, unexpected = self.positional_encoding.load_state_dict(positional_encoding_weights, strict=True)
+    #         logger.info(f"[DINO] Loaded positional_encoding | missing={len(missing)}, unexpected={len(unexpected)}")
+
+    #     # -------- DINO: level_embed --------
+    #     if "level_embed" in dino_ckpt:
+    #         with torch.no_grad():
+    #             self.level_embed.copy_(dino_ckpt["level_embed"])
+    #         logger.info("[DINO] Loaded level_embed from checkpoint")
+    #     else:
+    #         logger.warning("[DINO] level_embed not found in checkpoint — using random init")
+
+    #     # -------- DINO: encoder --------
+    #     if hasattr(self, "encoder"):
+    #         encoder_weights = {
+    #             k.replace("encoder.", ""): v
+    #             for k, v in dino_ckpt.items() if k.startswith("encoder.")
+    #         }
+    #         missing, unexpected = self.encoder.load_state_dict(encoder_weights, strict=True)
+    #         logger.info(f"[DINO] Loaded encoder | missing={len(missing)}, unexpected={len(unexpected)}")
+
+    #     if hasattr(self, "memory_trans_fc"):
+    #         memory_trans_fc_weights = {
+    #             k.replace("memory_trans_fc.", ""): v
+    #             for k, v in dino_ckpt.items() if k.startswith("memory_trans_fc.")
+    #         }
+
+    #         missing, unexpected = self.memory_trans_fc.load_state_dict(memory_trans_fc_weights, strict=True)
+    #         logger.info(f"[DINO] Loaded memory_trans_fc | missing={len(missing)}, unexpected={len(unexpected)}")
+
+    #     if hasattr(self, "memory_trans_norm"):
+    #         memory_trans_norm_weights = {
+    #             k.replace("memory_trans_norm.", ""): v
+    #             for k, v in dino_ckpt.items() if k.startswith("memory_trans_norm.")
+    #         }
+
+    #         missing, unexpected = self.memory_trans_norm.load_state_dict(memory_trans_norm_weights, strict=True)
+    #         logger.info(f"[DINO] Loaded memory_trans_norm | missing={len(missing)}, unexpected={len(unexpected)}")
+
+    #     # -------- DINO: decoder --------
+    #     if hasattr(self, "decoder"):
+    #         decoder_weights = {
+    #             k.replace("decoder.", ""): v
+    #             for k, v in dino_ckpt.items() if k.startswith("decoder.")
+    #         }
+    #         missing, unexpected = self.decoder.load_state_dict(decoder_weights, strict=True)
+    #         logger.info(f"[DINO] Loaded decoder | missing={len(missing)}, unexpected={len(unexpected)}")
+
+    #     # -------- DINO: bbox_head --------
+    #     if hasattr(self, "bbox_head"):
+    #         head_weights = {
+    #             k.replace("bbox_head.", ""): v
+    #             for k, v in dino_ckpt.items() if k.startswith("bbox_head.")
+    #         }
+    #         missing, unexpected = self.bbox_head.load_state_dict(head_weights, strict=False)
+    #         logger.info(f"[DINO] Loaded bbox_head | missing={len(missing)}, unexpected={len(unexpected)}")
+
+    #     if hasattr(self, "query_embedding"):
+    #         query_embedding_weights = {
+    #             k.replace("query_embedding.", ""): v
+    #             for k, v in dino_ckpt.items() if k.startswith("query_embedding.")
+    #         }
+
+    #         missing, unexpected = self.query_embedding.load_state_dict(query_embedding_weights, strict=True)
+    #         logger.info(f"[DINO] Loaded query_embedding | missing={len(missing)}, unexpected={len(unexpected)}")
+
+    #     if hasattr(self, "dn_query_generator"):
+    #         dn_query_generator_weights = {
+    #             k.replace("dn_query_generator.", ""): v
+    #             for k, v in dino_ckpt.items() if k.startswith("dn_query_generator.")
+    #         }
+
+    #         missing, unexpected = self.dn_query_generator.load_state_dict(dn_query_generator_weights, strict=True)
+    #         logger.info(f"[DINO] Loaded dn_query_generator | missing={len(missing)}, unexpected={len(unexpected)}")
+
+
+    def choose_embedding(self, filename, dino_mem, gdino_mem): 
+        import hashlib 
+        # hash filename to a number between 0 and 1 
+        h = int(hashlib.md5(filename.encode()).hexdigest(), 16) 
+        frac = (h % 10000) / 10000.0  
+        if frac < self.gdino_ratio: 
+            return gdino_mem.squeeze(0) # use GDINO 
+        else: 
+            return dino_mem 
+    
     def forward_transformer(
         self,
         img_feats: Tuple[Tensor],
@@ -115,6 +292,37 @@ class DINO(DeformableDETR):
 
         encoder_outputs_dict = self.forward_encoder(**encoder_inputs_dict)
 
+        # with torch.no_grad():
+        #     import os
+        #     save_dir = 'dino_embeddings'
+        #     for data_sample in batch_data_samples:
+        #         # full path of the image
+        #         img_path = data_sample.metainfo['img_path']
+
+        #         # just the filename without extension
+        #         filename = os.path.splitext(os.path.basename(img_path))[0]
+        #         torch.save(encoder_outputs_dict, f"{save_dir}/{filename}.pt")
+        #         import logging
+
+        #         logging.basicConfig(level=logging.INFO)
+        #         logger = logging.getLogger("DINO embedding")
+        #         logger.info(f"Saved DINO embeddings for {filename}.pt")
+
+        with torch.no_grad():  
+            import os  
+            if self.dino_cache is not None:  
+                for i, data_sample in enumerate(batch_data_samples):  
+                    img_path = data_sample.metainfo['img_path']  
+                    filename = os.path.splitext(os.path.basename(img_path))[0]  
+                    if filename not in self.dino_cache:  
+                        raise KeyError(f"DINO embedding missing for {filename}")  
+                    dino_embed = self.dino_cache[filename]
+                    emb_online = encoder_outputs_dict['memory'][i]
+                    emb_offline = dino_embed['memory'].squeeze(0).to(img_feats[0].device)
+                    import torch.nn.functional as F
+                    cos = F.cosine_similarity(emb_offline.flatten(), emb_online.flatten(), dim=0)
+                    print(cos)
+        
         tmp_dec_in, head_inputs_dict = self.pre_decoder(
             **encoder_outputs_dict, batch_data_samples=batch_data_samples)
         decoder_inputs_dict.update(tmp_dec_in)
@@ -122,7 +330,7 @@ class DINO(DeformableDETR):
         decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
         head_inputs_dict.update(decoder_outputs_dict)
         return head_inputs_dict
-
+    
     def pre_decoder(
         self,
         memory: Tensor,

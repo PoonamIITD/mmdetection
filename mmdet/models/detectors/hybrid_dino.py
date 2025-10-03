@@ -14,7 +14,7 @@ from mmdet.structures import OptSampleList, SampleList
 from mmdet.utils import ConfigType
 from ..layers import SinePositionalEncoding
 from ..layers.transformer.deformable_detr_layers import DeformableDetrTransformerEncoder
-
+from .deformable_detr import DeformableDETR
 from ..layers.transformer.grounding_dino_layers import (
     GroundingDinoTransformerEncoder
 )
@@ -63,20 +63,20 @@ class HybridDINO(DINO):
         self.use_autocast = use_autocast
         
         super().__init__(*args, **kwargs)
-        # dino_embed_dir = 'dino_embeddings' 
-        # self.dino_ratio = dino_ratio
-        # self.dino_cache = {} 
+        # gdino_embed_dir = 'gdino_embeddings' 
+        # self.gdino_cache = {} 
 
         # import os 
-        # for fname in os.listdir(dino_embed_dir): 
+        # for fname in os.listdir(gdino_embed_dir): 
         #     if fname.endswith(".pt"): 
         #         key = os.path.splitext(fname)[0] # filename without extension 
-        #         self.dino_cache[key] = torch.load( os.path.join(dino_embed_dir, fname), map_location="cpu") 
+        #         self.gdino_cache[key] = torch.load( os.path.join(gdino_embed_dir, fname), map_location="cpu") 
+                
                 
         # import logging 
         # logging.basicConfig(level=logging.INFO) 
-        # logger = logging.getLogger("Loading DINO embeddings") 
-        # logger.info(f"[HybridDINO] Loaded {len(self.dino_cache)} DINO embeddings into cache")  
+        # logger = logging.getLogger("Loading GDINO embeddings") 
+        # logger.info(f"[HybridDINO] Loaded {len(self.gdino_cache)} GDINO embeddings into cache")  
 
     def _init_layers(self) -> None:
         """Use GroundingDINO encoder and DINO decoder."""
@@ -131,11 +131,9 @@ class HybridDINO(DINO):
         self.level_embed.requires_grad = False
 
 
-
-
     def init_weights(self):
         """Initialize HybridDINO with GDINO (backbone+encoder) + DINO (decoder+head)."""
-        super().init_weights()
+        super(DeformableDETR, self).init_weights()
         from mmengine import MMLogger
 
         logger = MMLogger.get_current_instance()
@@ -161,6 +159,19 @@ class HybridDINO(DINO):
             # print([k for k in gdino_ckpt.keys() if k.startswith("backbone.")])
 
             logger.info(f"[GDINO] Loaded text_feat_map | missing={len(missing)}, unexpected={len(unexpected)}")
+
+        # -------- GDINO: text_feat_map --------
+        if hasattr(self, "language_model"):
+            language_model_weights = {
+                k.replace("language_model.", ""): v
+                for k, v in gdino_ckpt.items() if k.startswith("language_model.")
+            }
+
+            missing, unexpected = self.language_model.load_state_dict(language_model_weights, strict=True)
+            # print(self.backbone.state_dict().keys())
+            # print([k for k in gdino_ckpt.keys() if k.startswith("backbone.")])
+
+            logger.info(f"[GDINO] Loaded language_model | missing={len(missing)}, unexpected={len(unexpected)}")
         
         # -------- GDINO: backbone --------
         if hasattr(self, "backbone"):
@@ -176,7 +187,7 @@ class HybridDINO(DINO):
             logger.info(f"[GDINO] Loaded backbone | missing={len(missing)}, unexpected={len(unexpected)}")
 
 
-         # -------- GDINO: neck --------
+        # -------- GDINO: neck --------
         if hasattr(self, "neck"):
             neck_weights = {
                 k.replace("neck.", ""): v
@@ -230,15 +241,6 @@ class HybridDINO(DINO):
             missing, unexpected = self.memory_trans_norm.load_state_dict(memory_trans_norm_weights, strict=True)
             logger.info(f"[DINO] Loaded memory_trans_norm | missing={len(missing)}, unexpected={len(unexpected)}")
 
-        # # -------- DINO: encoder --------
-        # if hasattr(self, "encoder"):
-        #     dino_encoder_weights = {
-        #         k.replace("encoder.", ""): v
-        #         for k, v in dino_ckpt.items() if k.startswith("encoder.")
-        #     }
-        #     missing, unexpected = self.dino_encoder.load_state_dict(dino_encoder_weights, strict=True)
-        #     logger.info(f"[DINO] Loaded encoder | missing={len(missing)}, unexpected={len(unexpected)}")
-
         # -------- DINO: decoder --------
         if hasattr(self, "decoder"):
             decoder_weights = {
@@ -273,7 +275,7 @@ class HybridDINO(DINO):
             }
 
             missing, unexpected = self.dn_query_generator.load_state_dict(dn_query_generator_weights, strict=True)
-            logger.info(f"[DINO] Loaded dn_query_generator | missing={len(missing)}, unexpected={len(unexpected)}")   
+            logger.info(f"[DINO] Loaded dn_query_generator | missing={len(missing)}, unexpected={len(unexpected)}")
 
     def to_enhance_text_prompts(self, original_caption, enhanced_text_prompts):
         caption_string = ''
@@ -504,23 +506,21 @@ class HybridDINO(DINO):
             **encoder_inputs_dict, text_dict=text_dict)
         
         # encoder_outputs_dict = self.forward_encoder(**encoder_inputs_dict)
-        
+
         # with torch.no_grad():  
         #     import os  
-        #     if self.dino_cache is not None:  
+        #     if self.gdino_cache is not None:  
         #         for i, data_sample in enumerate(batch_data_samples):  
         #             img_path = data_sample.metainfo['img_path']  
         #             filename = os.path.splitext(os.path.basename(img_path))[0]  
-        #             if filename not in self.dino_cache:  
+        #             if filename not in self.gdino_cache:  
         #                 raise KeyError(f"DINO embedding missing for {filename}")  
-        #             dino_embed = self.dino_cache[filename]  
-        #             encoder_outputs_dict['memory'][i] = dino_embed['memory'].squeeze(0)
-                    # encoder_outputs_dict['memory_mask'][i] = dino_embed['memory_mask'].squeeze(0)
-                    # encoder_outputs_dict['spatial_shapes'][i] = dino_embed['spatial_shapes'].squeeze(0)
-                    # encoder_outputs_dict['memory'][i] = self.choose_embedding(
-                    #     filename,
-                    #     encoder_outputs_dict['memory'][i], 
-                    #     dino_embed['memory'].to(img_feats[0].device)) 
+        #             gdino_embed = self.gdino_cache[filename]
+        #             emb_online = encoder_outputs_dict['memory'][i]
+        #             emb_offline = gdino_embed['memory'].squeeze(0).to(img_feats[0].device)
+        #             import torch.nn.functional as F
+        #             cos = F.cosine_similarity(emb_offline.flatten(), emb_online.flatten(), dim=0)
+        #             print(cos)
 
         tmp_dec_in, head_inputs_dict = self.pre_decoder(
             **encoder_outputs_dict, batch_data_samples=batch_data_samples)
@@ -558,6 +558,7 @@ class HybridDINO(DINO):
         )
 
         # #----- DINO encoder forward ----
+        # self.encoder.eval()
         # memory = self.encoder(
         #     query=feat,
         #     query_pos=feat_pos,
@@ -770,11 +771,10 @@ class HybridDINO(DINO):
                         tokenized, new_tokens_positive)
                     positive_maps.append(positive_map)
                     new_text_prompts.append(caption_string)
-        # print(new_text_prompts)
+
         text_dict = self.language_model(new_text_prompts)
         if self.text_feat_map is not None:
             text_dict['embedded'] = self.text_feat_map(text_dict['embedded'])
-        # print(text_dict['embedded'].shape)
 
         for i, data_samples in enumerate(batch_data_samples):
             positive_map = positive_maps[i].to(
@@ -784,10 +784,6 @@ class HybridDINO(DINO):
             data_samples.gt_instances.text_token_mask = \
                 text_token_mask.unsqueeze(0).repeat(
                     len(positive_map), 1)
-        
-        # for data_samples in batch_data_samples:
-        #     if hasattr(data_samples, 'text'):
-        #         del data_samples.text
         
         if self.use_autocast:
             with autocast(enabled=True):
