@@ -1,4 +1,4 @@
-_base_ = './co_dino_5scale_r50_lsj_8xb2_1x_coco.py'
+_base_ = 'co_dino_5scale_r50_lsj_8xb2_1x_coco.py'
 
 model = dict(
     use_lsj=False, data_preprocessor=dict(pad_mask=False, batch_augments=None))

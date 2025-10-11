@@ -56,6 +56,16 @@ class CoDETR(BaseDetector):
             self.query_head.init_weights()
             head_idx += 1
 
+            def remap_keys(module, state_dict, prefix, local_metadata, strict,
+               missing_keys, unexpected_keys, error_msgs):
+                old_k = prefix + "label_embedding.weight"
+                new_k = prefix + "dn_generator.label_embedding.weight"
+                if old_k in state_dict and new_k not in state_dict:
+                    state_dict[new_k] = state_dict.pop(old_k)
+                    print(f"[CoDETR] Remapped {old_k} → {new_k}")
+
+            self.query_head.register_load_state_dict_pre_hook(remap_keys)
+
         if rpn_head is not None:
             rpn_train_cfg = train_cfg[head_idx].rpn if (
                 train_cfg is not None
@@ -93,6 +103,8 @@ class CoDETR(BaseDetector):
         self.head_idx = head_idx
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
+
+    
 
     @property
     def with_rpn(self):
