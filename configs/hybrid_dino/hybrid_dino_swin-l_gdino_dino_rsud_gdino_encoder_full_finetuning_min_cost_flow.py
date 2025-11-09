@@ -126,12 +126,14 @@ model = dict(
      # training and testing settings
     train_cfg=dict(
         assigner=dict(
-            type='HungarianAssigner',
+            # type='HungarianAssigner',
+            type='MinCostFlowAssigner',
             match_costs=[
                 dict(type='FocalLossCost', weight=2.0),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
-            ])),
+            ],
+            repetition=2)),
     test_cfg=dict(max_per_img=300),
     dino_ratio = 0.0
     )
@@ -207,12 +209,12 @@ val_dataloader = dict(
         type='CocoDataset',
         metainfo=metainfo,
         data_root=data_root,
-        ann_file='annotations/instances_test2017.json',
-        data_prefix=dict(img='images/test')))
+        ann_file='annotations/instances_val2017.json',
+        data_prefix=dict(img='images/val')))
 
 test_dataloader = val_dataloader
 
-val_evaluator = dict(ann_file=data_root + 'annotations/instances_test2017.json')
+val_evaluator = dict(ann_file=data_root + 'annotations/instances_val2017.json')
 test_evaluator = val_evaluator
 
 max_epoch = 15

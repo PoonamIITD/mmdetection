@@ -19,6 +19,12 @@ from .dino import DINO
 from .glip import (create_positive_map, create_positive_map_label_to_token,
                    run_ner)
 
+import os
+import cv2
+import json
+import pandas as pd
+from collections import defaultdict
+from pycocotools.coco import COCO
 
 def clean_label_name(name: str) -> str:
     name = re.sub(r'\(.*\)', '', name)
@@ -618,4 +624,212 @@ class GroundingDINO(DINO):
                 # for visualization
                 pred_instances.label_names = label_names
             data_sample.pred_instances = pred_instances
+        
+        # save_dir = "/home/poonam_rajput/scratch/mmdetection/test_outputs/results_analysis"
+        # anno_file = "/home/poonam_rajput/scratch/dataset/RSUD_dataset/annotations/instances_test2017.json"
+        # score_thr = 0.3
+        # iou_thr=0.5
+        # self.analyze_predictions(batch_data_samples, save_dir, anno_file, score_thr)
         return batch_data_samples
+    
+
+    def analyze_predictions(self, batch_data_samples, save_dir, anno_file, score_thr=0.3):
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Load COCO GT annotations
+        coco_gt = COCO(anno_file)
+        categories = coco_gt.loadCats(coco_gt.getCatIds())
+        category_name_to_id = {c["name"]: c["id"] for c in categories}
+
+        # Collect per-image stats
+        per_image_stats = []
+        class_stats = defaultdict(lambda: {"TP": 0, "FP": 0, "FN": 0, "Misclass": 0, "BBoxError": 0})
+
+        # Lists to hold FPs and FNs
+        false_positive_list = []
+        false_negative_list = []
+        image_list = []
+        ann_list = []
+
+        for data_sample in batch_data_samples:
+            img_path = data_sample.img_path
+            img = cv2.imread(img_path)
+            base_name = os.path.splitext(os.path.basename(img_path))[0]
+
+            # ------------------------
+            # Ground Truth
+            # ------------------------
+            img_id = None
+            for i in coco_gt.getImgIds():
+                info = coco_gt.loadImgs([i])[0]
+                if info['file_name'] == os.path.basename(img_path):
+                    img_id = i
+                    img_info = info
+                    break
+
+            gt_anns = []
+            if img_id is not None:
+                ann_ids = coco_gt.getAnnIds(imgIds=[img_id])
+                anns = coco_gt.loadAnns(ann_ids)
+                for ann in anns:
+                    x, y, w, h = map(int, ann["bbox"])
+                    cat_name = coco_gt.loadCats([ann["category_id"]])[0]["name"]
+                    gt_anns.append({"bbox": [x, y, x + w, y + h],
+                                    "label": cat_name,
+                                    "ann_id": ann["id"],
+                                    "category_id": ann["category_id"]})
+
+            # ------------------------
+            # Predictions
+            # ------------------------
+            pred = data_sample.pred_instances
+            bboxes = pred.bboxes.cpu().numpy()
+            scores = pred.scores.cpu().numpy()
+            labels = pred.label_names if hasattr(pred, "label_names") else pred.labels.cpu().numpy()
+
+            pred_anns = []
+            for bbox, score, label in zip(bboxes, scores, labels):
+                if score < score_thr:
+                    continue
+                x1, y1, x2, y2 = map(int, bbox)
+                pred_anns.append({"bbox": [x1, y1, x2, y2],
+                                "label": label,
+                                "score": float(score)})
+
+            # ------------------------
+            # Stats Calculation
+            # ------------------------
+            img_stats = {"image": base_name, "TotalBoxes": 0,
+                        "TP": 0, "FP": 0, "FN": 0, "Misclass": 0, "BBoxError": 0}
+
+            matched_gt = set()
+            matched_pred = set()
+
+            def iou(boxA, boxB):
+                xA = max(boxA[0], boxB[0])
+                yA = max(boxA[1], boxB[1])
+                xB = min(boxA[2], boxB[2])
+                yB = min(boxA[3], boxB[3])
+                interArea = max(0, xB - xA) * max(0, yB - yA)
+                boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+                boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+                return interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+
+            img_stats["TotalBoxes"] = len(gt_anns)
+
+            # Match GT to predictions
+            for gi, gt in enumerate(gt_anns):
+                best_iou, best_pi = 0, None
+                for pi, pred in enumerate(pred_anns):
+                    if pi in matched_pred:
+                        continue
+                    iou_val = iou(gt["bbox"], pred["bbox"])
+                    if iou_val > best_iou:
+                        best_iou, best_pi = iou_val, pi
+
+                if best_pi is not None and best_iou > 0.5:
+                    pred = pred_anns[best_pi]
+                    matched_gt.add(gi)
+                    matched_pred.add(best_pi)
+                    if pred["label"] == gt["label"]:
+                        img_stats["TP"] += 1
+                        class_stats[gt["label"]]["TP"] += 1
+                        if best_iou < 0.75:
+                            img_stats["BBoxError"] += 1
+                            class_stats[gt["label"]]["BBoxError"] += 1
+                    else:
+                        img_stats["Misclass"] += 1
+                        class_stats[gt["label"]]["Misclass"] += 1
+                else:
+                    img_stats["FN"] += 1
+                    class_stats[gt["label"]]["FN"] += 1
+                    # Save FN as missed GT
+                    fn_ann = {
+                        "id": gt["ann_id"],
+                        "image_id": img_id,
+                        "category_id": gt["category_id"],
+                        "bbox": [gt["bbox"][0], gt["bbox"][1],
+                                gt["bbox"][2] - gt["bbox"][0],
+                                gt["bbox"][3] - gt["bbox"][1]],
+                        "iscrowd": 0,
+                        "area": (gt["bbox"][2] - gt["bbox"][0]) * (gt["bbox"][3] - gt["bbox"][1])
+                    }
+                    false_negative_list.append(fn_ann)
+                    if img_info not in image_list:
+                        image_list.append(img_info)
+
+            # Collect FPs
+            for pi, pred in enumerate(pred_anns):
+                if pi not in matched_pred:
+                    img_stats["FP"] += 1
+                    class_stats[pred["label"]]["FP"] += 1
+                    fp_det = {
+                        "image_id": img_id,
+                        "category_id": category_name_to_id.get(pred["label"], -1),
+                        "bbox": [pred["bbox"][0], pred["bbox"][1],
+                                pred["bbox"][2] - pred["bbox"][0],
+                                pred["bbox"][3] - pred["bbox"][1]],
+                        "score": pred["score"]
+                    }
+                    false_positive_list.append(fp_det)
+
+            per_image_stats.append(img_stats)
+
+        # ------------------------
+        # Save per-image CSV stats
+        # ------------------------
+        df = pd.DataFrame(per_image_stats)
+        csv_file = "detection_stats.csv"
+        csv_path = os.path.join(save_dir, csv_file)
+        if os.path.exists(csv_path):
+            df.to_csv(csv_path, mode="a", header=False, index=False)
+        else:
+            df.to_csv(csv_path, index=False)
+        print(f"Appended batch stats to {csv_path}")
+
+        # ------------------------
+        # Save FP (append mode)
+        # ------------------------
+        fp_path = os.path.join(save_dir, "false_positives.json")
+        if os.path.exists(fp_path) and os.path.getsize(fp_path) > 0:
+            try:
+                with open(fp_path, "r") as f:
+                    existing_fps = json.load(f)
+            except json.JSONDecodeError:
+                existing_fps = []
+        else:
+            existing_fps = []
+        existing_fps.extend(false_positive_list)
+        with open(fp_path, "w") as f:
+            json.dump(existing_fps, f)
+        print(f"Appended False Positives to {fp_path}")
+
+        # ------------------------
+        # Save FN (append mode, COCO-style)
+        # ------------------------
+        fn_path = os.path.join(save_dir, "false_negatives.json")
+        if os.path.exists(fn_path):
+            with open(fn_path, "r") as f:
+                existing_fns = json.load(f)
+            existing_fns["annotations"].extend(false_negative_list)
+
+            # merge images (avoid duplicates by image_id)
+            existing_image_ids = {img["id"] for img in existing_fns["images"]}
+            for img in image_list:
+                if img["id"] not in existing_image_ids:
+                    existing_fns["images"].append(img)
+            fn_json = existing_fns
+        else:
+            fn_json = {
+                "images": image_list,
+                "annotations": false_negative_list,
+                "categories": categories
+            }
+
+        with open(fn_path, "w") as f:
+            json.dump(fn_json, f)
+        print(f"Appended False Negatives to {fn_path}")
+
+
+        return class_stats
+

@@ -1,41 +1,19 @@
-# _base_ = [
-#     '../_base_/datasets/coco_detection.py',
-#     '../_base_/schedules/schedule_1x.py', '../_base_/default_runtime.py'
-# ]
+_base_ = 'grounding_dino_swin-t_pretrain_obj365.py'
 
-_base_ = '../mm_grounding_dino/grounding_dino_swin-t_pretrain_obj365.py'
+# load_from = 'https://download.openmmlab.com/mmdetection/v3.0/mm_grounding_dino/grounding_dino_swin-l_pretrain_obj365_goldg/grounding_dino_swin-l_pretrain_obj365_goldg-34dcdc53.pth'  # noqa
+# pretrained = 'https://github.com/SwinTransformer/storage/releases/download/v1.0.0/swin_large_patch4_window12_384_22k.pth'  # noqa
 
+load_from = "/home/poonam_rajput/scratch/mmdetection/checkpoints/grounding_dino_swin-l_pretrain_all-56d69e78.pth"
 data_root = '/home/poonam_rajput/scratch/dataset/RSUD_dataset/'
 class_name = ('person','rickshaw','rickshaw van','auto rickshaw','truck','pickup truck','private car','motorcycle','bicycle','bus','micro bus','covered van','human hauler', )
 num_classes = len(class_name)
 num_levels = 5
-lang_model_name = 'bert-base-uncased'
 
 model = dict(
-    _delete_=True,
-    type='HybridDINO',
     use_autocast=True,
     num_feature_levels=num_levels,
-    num_queries=900,
-    with_box_refine=True,
-    as_two_stage=True,
-    data_preprocessor=dict(
-        type='DetDataPreprocessor',
-        mean=[123.675, 116.28, 103.53],
-        std=[58.395, 57.12, 57.375],
-        bgr_to_rgb=True,
-        pad_mask=False,
-    ),
-    language_model=dict(
-        type='BertModel',
-        name=lang_model_name,
-        max_tokens=256,
-        pad_to_max=False,
-        use_sub_sentence_represent=True,
-        special_tokens_list=['[CLS]', '[SEP]', '.', '?'],
-        add_pooling_layer=False,
-    ),
     backbone=dict(
+        _delete_=True,
         type='SwinTransformer',
         pretrain_img_size=384,
         embed_dims=192,
@@ -55,86 +33,24 @@ model = dict(
         with_cp=True,
         convert_weights=True,
         frozen_stages=-1,
-        init_cfg=None
-    ),
-    neck=dict(
-        type='ChannelMapper',
-        in_channels=[192, 384, 768, 1536], 
-        kernel_size=1,
-        out_channels=256,
-        act_cfg=None,
-        bias=True,
-        norm_cfg=dict(type='GN', num_groups=32),
-        num_outs=num_levels
-    ),
-    encoder=dict(
-        num_layers=6,
-        num_cp=6,
-        # visual layer config
-        layer_cfg=dict(
-            self_attn_cfg=dict(embed_dims=256, num_levels=num_levels, dropout=0.0),
-            ffn_cfg=dict(
-                embed_dims=256, feedforward_channels=2048, ffn_drop=0.0)),
-        # text layer config
-        text_layer_cfg=dict(
-            self_attn_cfg=dict(num_heads=4, embed_dims=256, dropout=0.0),
-            ffn_cfg=dict(
-                embed_dims=256, feedforward_channels=1024, ffn_drop=0.0)),
-        # fusion layer config
-        fusion_layer_cfg=dict(
-            v_dim=256,
-            l_dim=256,
-            embed_dim=1024,
-            num_heads=4,
-            init_values=1e-4),
-    ),
-    decoder=dict(
-        num_layers=6,
-        return_intermediate=True,
-        layer_cfg=dict(
-            self_attn_cfg=dict(embed_dims=256, num_heads=8,
-                               dropout=0.0),  # 0.1 for DeformDETR
-            cross_attn_cfg=dict(embed_dims=256, num_levels=num_levels,
-                                dropout=0.0),  # 0.1 for DeformDETR
-            ffn_cfg=dict(
-                embed_dims=256,
-                feedforward_channels=2048,  # 1024 for DeformDETR
-                ffn_drop=0.0)),  # 0.1 for DeformDETR
-        post_norm_cfg=None),
-    positional_encoding=dict(
-        num_feats=128,
-        normalize=True,
-        offset=0.0,  # -0.5 for DeformDETR
-        temperature=20),  # 10000 for DeformDETR
-    bbox_head=dict(
-        type='DINOHead',
-        num_classes=num_classes,
-        sync_cls_avg_factor=True,
-        loss_cls=dict(
-            type='FocalLoss',
-            use_sigmoid=True,
-            gamma=2.0,
-            alpha=0.25,
-            loss_weight=1.0),  # 2.0 in DeformDETR
-        loss_bbox=dict(type='L1Loss', loss_weight=5.0),
-        loss_iou=dict(type='GIoULoss', loss_weight=2.0)),
-    dn_cfg=dict(  # TODO: Move to model.train_cfg ?
-        label_noise_scale=0.5,
-        box_noise_scale=1.0,  # 0.4 for DN-DETR
-        group_cfg=dict(dynamic=True, num_groups=None,
-                       num_dn_queries=100)),  # TODO: half num_dn_queries
-     # training and testing settings
+        init_cfg=None),
+    neck=dict(in_channels=[192, 384, 768, 1536], num_outs=num_levels),
+    encoder=dict(layer_cfg=dict(self_attn_cfg=dict(num_levels=num_levels))),
+    decoder=dict(layer_cfg=dict(cross_attn_cfg=dict(num_levels=num_levels))),
     train_cfg=dict(
         assigner=dict(
-            type='HungarianAssigner',
+            # type='HungarianAssigner',
+            type='MinCostFlowAssigner',
             match_costs=[
-                dict(type='FocalLossCost', weight=2.0),
+                dict(type='BinaryFocalLossCost', weight=2.0),
                 dict(type='BBoxL1Cost', weight=5.0, box_format='xywh'),
                 dict(type='IoUCost', iou_mode='giou', weight=2.0)
-            ])),
-    test_cfg=dict(max_per_img=300),
-    dino_ratio = 0.0
-    )
+            ],
+            repetition=3,
+            dummy_weight=8)),
+    bbox_head=dict(num_classes=num_classes))
+
+
 
 import random
 # Generate a random palette with unique colors
@@ -207,15 +123,15 @@ val_dataloader = dict(
         type='CocoDataset',
         metainfo=metainfo,
         data_root=data_root,
-        ann_file='annotations/instances_test2017.json',
-        data_prefix=dict(img='images/test')))
+        ann_file='annotations/instances_val2017.json',
+        data_prefix=dict(img='images/val')))
 
 test_dataloader = val_dataloader
 
-val_evaluator = dict(ann_file=data_root + 'annotations/instances_test2017.json')
+val_evaluator = dict(ann_file=data_root + 'annotations/instances_val2017.json')
 test_evaluator = val_evaluator
 
-max_epoch = 15
+max_epoch = 20
 
 default_hooks = dict(
     checkpoint=dict(interval=1, max_keep_ckpts=1, save_best='coco/bbox_mAP', rule='greater'),

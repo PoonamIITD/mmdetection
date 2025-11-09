@@ -308,20 +308,20 @@ class DINO(DeformableDETR):
         #         logger = logging.getLogger("DINO embedding")
         #         logger.info(f"Saved DINO embeddings for {filename}.pt")
 
-        with torch.no_grad():  
-            import os  
-            if self.dino_cache is not None:  
-                for i, data_sample in enumerate(batch_data_samples):  
-                    img_path = data_sample.metainfo['img_path']  
-                    filename = os.path.splitext(os.path.basename(img_path))[0]  
-                    if filename not in self.dino_cache:  
-                        raise KeyError(f"DINO embedding missing for {filename}")  
-                    dino_embed = self.dino_cache[filename]
-                    emb_online = encoder_outputs_dict['memory'][i]
-                    emb_offline = dino_embed['memory'].squeeze(0).to(img_feats[0].device)
-                    import torch.nn.functional as F
-                    cos = F.cosine_similarity(emb_offline.flatten(), emb_online.flatten(), dim=0)
-                    print(cos)
+        # with torch.no_grad():  
+        #     import os  
+        #     if self.dino_cache is not None:  
+        #         for i, data_sample in enumerate(batch_data_samples):  
+        #             img_path = data_sample.metainfo['img_path']  
+        #             filename = os.path.splitext(os.path.basename(img_path))[0]  
+        #             if filename not in self.dino_cache:  
+        #                 raise KeyError(f"DINO embedding missing for {filename}")  
+        #             dino_embed = self.dino_cache[filename]
+        #             emb_online = encoder_outputs_dict['memory'][i]
+        #             emb_offline = dino_embed['memory'].squeeze(0).to(img_feats[0].device)
+        #             import torch.nn.functional as F
+        #             cos = F.cosine_similarity(emb_offline.flatten(), emb_online.flatten(), dim=0)
+        #             print(cos)
         
         tmp_dec_in, head_inputs_dict = self.pre_decoder(
             **encoder_outputs_dict, batch_data_samples=batch_data_samples)

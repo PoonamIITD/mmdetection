@@ -12,6 +12,7 @@ from .match_cost import (BBoxL1Cost, BinaryFocalLossCost, ClassificationCost,
                          CrossEntropyLossCost, DiceCost, FocalLossCost,
                          IoUCost)
 from .max_iou_assigner import MaxIoUAssigner
+from .min_cost_flow_assigner import MinCostFlowAssigner
 from .multi_instance_assigner import MultiInstanceAssigner
 from .point_assigner import PointAssigner
 from .region_assigner import RegionAssigner
@@ -28,5 +29,5 @@ __all__ = [
     'TaskAlignedAssigner', 'TopkHungarianAssigner', 'BBoxL1Cost',
     'ClassificationCost', 'CrossEntropyLossCost', 'DiceCost', 'FocalLossCost',
     'IoUCost', 'BboxOverlaps2D', 'DynamicSoftLabelAssigner',
-    'MultiInstanceAssigner', 'BboxOverlaps2D_GLIP'
+    'MultiInstanceAssigner', 'BboxOverlaps2D_GLIP', 'MinCostFlowAssigner'
 ]
