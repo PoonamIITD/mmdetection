@@ -2,8 +2,15 @@
 # Hybrid model: GDINO Encoder + DINO Decoder
 import copy
 import torch
+import os
+import json
+import cv2
+import numpy as np
+import pandas as pd
 import torch.nn as nn
 from torch import Tensor
+from collections import defaultdict
+from pycocotools.coco import COCO
 import re
 from typing import Dict, Tuple, Optional, Union, List
 import warnings
@@ -23,14 +30,6 @@ from ..layers.transformer.dino_layers import (
 )
 from .dino import DINO
 from .glip import create_positive_map, create_positive_map_label_to_token, run_ner
-
-
-import os
-import cv2
-import json
-import pandas as pd
-from collections import defaultdict
-from pycocotools.coco import COCO
 
 def clean_label_name(name: str) -> str:
     name = re.sub(r'\(.*\)', '', name)
@@ -62,6 +61,7 @@ class HybridDINO(DINO):
 
     def __init__(self,
                  language_model,
+                 text_encoder,
                  dino_ratio=0.0,
                  *args,
                  use_autocast=False,
@@ -69,7 +69,7 @@ class HybridDINO(DINO):
         self.language_model_cfg = language_model
         self._special_tokens = '. '
         self.use_autocast = use_autocast
-        
+        self.text_encoder = text_encoder
         super().__init__(*args, **kwargs)
         # gdino_embed_dir = 'gdino_embeddings' 
         # self.gdino_cache = {} 
@@ -91,8 +91,8 @@ class HybridDINO(DINO):
         # Positional encoding
         self.positional_encoding = SinePositionalEncoding(**self.positional_encoding)
         # Encoder from GroundingDINO
-        self.encoder = GroundingDinoTransformerEncoder(**self.encoder)
-        # self.encoder = DeformableDetrTransformerEncoder(**self.encoder)
+        self.text_encoder = GroundingDinoTransformerEncoder(**self.text_encoder)
+        self.encoder = DeformableDetrTransformerEncoder(**self.encoder)
         # Decoder from DINO
         self.decoder = DinoTransformerDecoder(**self.decoder)
         self.embed_dims = self.encoder.embed_dims
@@ -127,9 +127,11 @@ class HybridDINO(DINO):
         for param in self.text_feat_map.parameters():
             param.requires_grad = False
         
-        for param in self.encoder.parameters():
-            param.requires_grad = False
+        # for param in self.encoder.parameters():
+        #     param.requires_grad = False
 
+        for param in self.text_encoder.parameters():
+            param.requires_grad = False
         # for param in self.dino_encoder.parameters():
         #     param.requires_grad = False
 
@@ -147,11 +149,11 @@ class HybridDINO(DINO):
         logger = MMLogger.get_current_instance()
         # GDINO_swin-l_pretrained_rsud_best_mAP_epoch_19.pth
         gdino_ckpt = torch.load(
-            '/home/poonam_rajput/scratch/mmdetection/checkpoints/GDINO_swin-l_pretrained_rsud_best_mAP_epoch_19.pth',
+            '/home/tushar/scratch/checkpoints/GDINO_swin-l_pretrained_rsud_best_mAP_epoch_19.pth',
             map_location='cpu'
         )['state_dict']
         dino_ckpt = torch.load(
-            '/home/poonam_rajput/scratch/mmdetection/checkpoints/DINO-swin-L_pretrained_rsud_best_epoch_16.pth',
+            '/home/tushar/scratch/checkpoints/DINO-swin-L_pretrained_rsud_best_epoch_16.pth',
             map_location='cpu'
         )['state_dict']
 
@@ -222,32 +224,24 @@ class HybridDINO(DINO):
         else:
             logger.warning("[GDINO] level_embed not found in checkpoint — using random init")
 
-        # -------- GDINO: encoder --------
-        if hasattr(self, "encoder"):
+        # -------- GDINO: text_encoder --------
+        if hasattr(self, "text_encoder"):
             encoder_weights = {
                 k.replace("encoder.", ""): v
                 for k, v in gdino_ckpt.items() if k.startswith("encoder.")
             }
+            missing, unexpected = self.text_encoder.load_state_dict(encoder_weights, strict=True)
+            logger.info(f"[GDINO] Loaded text_encoder | missing={len(missing)}, unexpected={len(unexpected)}")
+
+
+        # -------- DINO: encoder --------
+        if hasattr(self, "encoder"):
+            encoder_weights = {
+                k.replace("encoder.", ""): v
+                for k, v in dino_ckpt.items() if k.startswith("encoder.")
+            }
             missing, unexpected = self.encoder.load_state_dict(encoder_weights, strict=True)
-            logger.info(f"[GDINO] Loaded encoder | missing={len(missing)}, unexpected={len(unexpected)}")
-
-        if hasattr(self, "memory_trans_fc"):
-            memory_trans_fc_weights = {
-                k.replace("memory_trans_fc.", ""): v
-                for k, v in dino_ckpt.items() if k.startswith("memory_trans_fc.")
-            }
-
-            missing, unexpected = self.memory_trans_fc.load_state_dict(memory_trans_fc_weights, strict=True)
-            logger.info(f"[DINO] Loaded memory_trans_fc | missing={len(missing)}, unexpected={len(unexpected)}")
-
-        if hasattr(self, "memory_trans_norm"):
-            memory_trans_norm_weights = {
-                k.replace("memory_trans_norm.", ""): v
-                for k, v in dino_ckpt.items() if k.startswith("memory_trans_norm.")
-            }
-
-            missing, unexpected = self.memory_trans_norm.load_state_dict(memory_trans_norm_weights, strict=True)
-            logger.info(f"[DINO] Loaded memory_trans_norm | missing={len(missing)}, unexpected={len(unexpected)}")
+            logger.info(f"[DINO] Loaded encoder | missing={len(missing)}, unexpected={len(unexpected)}")
 
         # -------- DINO: decoder --------
         if hasattr(self, "decoder"):
@@ -551,7 +545,7 @@ class HybridDINO(DINO):
     ) -> Dict:
 
         # ---- GDINO encoder forward ----
-        memory, memory_text = self.encoder(
+        image_value, memory_text = self.text_encoder(
             query=feat,
             query_pos=feat_pos,
             key_padding_mask=feat_mask,
@@ -565,18 +559,17 @@ class HybridDINO(DINO):
             # return_intermediate = True
         )
 
-        # #----- DINO encoder forward ----
-        # self.encoder.eval()
-        # memory = self.encoder(
-        #     query=feat,
-        #     query_pos=feat_pos,
-        #     key_padding_mask=feat_mask,  # for self_attn
-        #     spatial_shapes=spatial_shapes,
-        #     level_start_index=level_start_index,
-        #     valid_ratios=valid_ratios)
+        memory = self.encoder(  #dino encoder
+            query=feat,
+            query_pos=feat_pos,
+            key_padding_mask=feat_mask,  # for self_attn
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            valid_ratios=valid_ratios)
 
         return dict(
             memory=memory,
+            image_value = image_value,
             memory_mask=feat_mask,
             spatial_shapes=spatial_shapes,
         )
@@ -584,6 +577,7 @@ class HybridDINO(DINO):
     def pre_decoder(
         self,
         memory: Tensor,
+        image_value: Tensor,
         memory_mask: Tensor,
         spatial_shapes: Tensor,
         batch_data_samples: OptSampleList = None,
@@ -632,7 +626,7 @@ class HybridDINO(DINO):
 
         decoder_inputs_dict = dict(
             query=query,
-            memory=memory,
+            memory=image_value,
             reference_points=reference_points,
             # memory_per_layer = memory_per_layer,
             dn_mask=dn_mask)
@@ -813,6 +807,423 @@ class HybridDINO(DINO):
         
         return losses
     
+    
+    def compute_iou(self, box1, box2):
+        """IoU for two boxes [x1,y1,x2,y2]."""
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+
+        inter_w = max(0, x2 - x1)
+        inter_h = max(0, y2 - y1)
+        inter_area = inter_w * inter_h
+
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+
+        union = area1 + area2 - inter_area
+        return inter_area / union if union > 0 else 0
+
+
+
+    def analyze_predictions(self, batch_data_samples, save_dir, anno_file, score_thr=0.3):
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Load COCO GT annotations
+        coco_gt = COCO(anno_file)
+
+        # Collect per-image stats for this batch
+        per_image_stats = []
+        class_stats = defaultdict(lambda: {"TP":0, "FP":0, "FN":0, "Misclass":0, "BBoxError":0})
+
+        for data_sample in batch_data_samples:
+            img_path = data_sample.img_path
+            img = cv2.imread(img_path)
+            base_name = os.path.splitext(os.path.basename(img_path))[0]
+
+            # ------------------------
+            # Ground Truth
+            # ------------------------
+            img_id = None
+            for i in coco_gt.getImgIds():
+                info = coco_gt.loadImgs([i])[0]
+                if info['file_name'] == os.path.basename(img_path):
+                    img_id = i
+                    break
+
+            gt_anns = []
+            gt_img = img.copy()
+            if img_id is not None:
+                ann_ids = coco_gt.getAnnIds(imgIds=[img_id])
+                anns = coco_gt.loadAnns(ann_ids)
+                for ann in anns:
+                    x, y, w, h = map(int, ann["bbox"])
+                    cat_name = coco_gt.loadCats([ann["category_id"]])[0]["name"]
+                    gt_anns.append({"bbox":[x,y,x+w,y+h], "label":cat_name})
+                    cv2.rectangle(gt_img, (x, y), (x + w, y + h), (255, 0, 0), 2)
+                    cv2.putText(gt_img, f"{cat_name}", (x, y - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+            # ------------------------
+            # Predictions
+            # ------------------------
+            pred_img = img.copy()
+            pred = data_sample.pred_instances
+            bboxes = pred.bboxes.cpu().numpy()
+            scores = pred.scores.cpu().numpy()
+            labels = pred.label_names if hasattr(pred, "label_names") else pred.labels.cpu().numpy()
+
+            pred_anns = []
+            for bbox, score, label in zip(bboxes, scores, labels):
+                if score < score_thr:
+                    continue
+                x1, y1, x2, y2 = map(int, bbox)
+                pred_anns.append({"bbox":[x1,y1,x2,y2], "label":label, "score":score})
+                cv2.rectangle(pred_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(pred_img, f"{label}:{score:.2f}", (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+            # ------------------------
+            # Combine GT + Pred
+            # ------------------------
+            combined = np.concatenate((gt_img, pred_img), axis=1)
+            out_file = os.path.join(save_dir, f"{base_name}_gt_pred.jpg")
+            cv2.imwrite(out_file, combined)
+
+            # ------------------------
+            # Stats Calculation
+            # ------------------------
+            img_stats = {"image": base_name, "TotalBoxes":0, "TP":0, "FP":0, "FN":0, "Misclass":0, "BBoxError":0}
+
+            matched_gt = set()
+            matched_pred = set()
+
+            def iou(boxA, boxB):
+                xA = max(boxA[0], boxB[0])
+                yA = max(boxA[1], boxB[1])
+                xB = min(boxA[2], boxB[2])
+                yB = min(boxA[3], boxB[3])
+                interArea = max(0, xB-xA) * max(0, yB-yA)
+                boxAArea = (boxA[2]-boxA[0])*(boxA[3]-boxA[1])
+                boxBArea = (boxB[2]-boxB[0])*(boxB[3]-boxB[1])
+                return interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+            img_stats["TotalBoxes"] = len(gt_anns)
+            for gi, gt in enumerate(gt_anns):
+                best_iou, best_pi = 0, None
+                for pi, pred in enumerate(pred_anns):
+                    if pi in matched_pred: 
+                        continue
+                    iou_val = iou(gt["bbox"], pred["bbox"])
+                    if iou_val > best_iou:
+                        best_iou, best_pi = iou_val, pi
+
+                if best_pi is not None and best_iou > 0.5:
+                    pred = pred_anns[best_pi]
+                    matched_gt.add(gi)
+                    matched_pred.add(best_pi)
+                    if pred["label"] == gt["label"]:
+                        img_stats["TP"] += 1
+                        class_stats[gt["label"]]["TP"] += 1
+                        if best_iou < 0.75:  # loose threshold for bbox error
+                            img_stats["BBoxError"] += 1
+                            class_stats[gt["label"]]["BBoxError"] += 1
+                    else:
+                        img_stats["Misclass"] += 1
+                        class_stats[gt["label"]]["Misclass"] += 1
+                else:
+                    img_stats["FN"] += 1
+                    class_stats[gt["label"]]["FN"] += 1
+
+            for pi, pred in enumerate(pred_anns):
+                if pi not in matched_pred:
+                    img_stats["FP"] += 1
+                    class_stats[pred["label"]]["FP"] += 1
+
+            per_image_stats.append(img_stats)
+
+        # ------------------------
+        # Save Results
+        # ------------------------
+        df = pd.DataFrame(per_image_stats)
+        csv_file = "detection_stats.csv"
+        csv_path = os.path.join(save_dir, csv_file)
+        if os.path.exists(csv_path):
+            df.to_csv(csv_path, mode="a", header=False, index=False)  # append mode
+        else:
+            df.to_csv(csv_path, index=False)  # write with header if first time
+        print(f"Appended batch stats to {csv_path}")
+
+        return class_stats  # so you can aggregate per-class later
+
+
+
+
+    def analyze_predictions2(self, batch_data_samples, save_dir, anno_file, score_thr=0.1):
+        os.makedirs(save_dir, exist_ok=True)
+        coco_gt = COCO(anno_file)
+
+        per_image_stats = []
+        class_stats = defaultdict(lambda: {"TP":0, "FP":0, "FN":0, "Misclass":0, "BBoxError":0})
+
+        for data_sample in batch_data_samples:
+            img_path = data_sample.img_path
+            img = cv2.imread(img_path)
+            base_name = os.path.splitext(os.path.basename(img_path))[0]
+
+            # ------------------------
+            # Load Ground Truth
+            # ------------------------
+            img_id = None
+            for i in coco_gt.getImgIds():
+                info = coco_gt.loadImgs([i])[0]
+                if info['file_name'] == os.path.basename(img_path):
+                    img_id = i
+                    break
+
+            gt_anns = []
+            if img_id is not None:
+                ann_ids = coco_gt.getAnnIds(imgIds=[img_id])
+                anns = coco_gt.loadAnns(ann_ids)
+                for ann in anns:
+                    x, y, w, h = map(int, ann["bbox"])
+                    cat_name = coco_gt.loadCats([ann["category_id"]])[0]["name"]
+                    gt_anns.append({"bbox": [x, y, x + w, y + h], "label": cat_name})
+
+            # ------------------------
+            # Load Predictions
+            # ------------------------
+            pred = data_sample.pred_instances
+            bboxes = pred.bboxes.cpu().numpy()
+            scores = pred.scores.cpu().numpy()
+            labels = pred.label_names if hasattr(pred, "label_names") else pred.labels.cpu().numpy()
+
+            pred_anns = []
+            for bbox, score, label in zip(bboxes, scores, labels):
+                if score < score_thr:
+                    continue
+                x1, y1, x2, y2 = map(int, bbox)
+                pred_anns.append({"bbox": [x1, y1, x2, y2], "label": label, "score": score})
+
+            # ------------------------
+            # Matching Logic
+            # ------------------------
+            matched_gt = set()
+            matched_pred = set()
+
+            def iou(boxA, boxB):
+                xA = max(boxA[0], boxB[0])
+                yA = max(boxA[1], boxB[1])
+                xB = min(boxA[2], boxB[2])
+                yB = min(boxA[3], boxB[3])
+                interArea = max(0, xB - xA) * max(0, yB - yA)
+                boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+                boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+                return interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+
+            img_stats = {"image": base_name, "TotalBoxes": len(gt_anns), "TP": 0, "FP": 0, "FN": 0, "Misclass": 0, "BBoxError": 0}
+
+            matches = []  # store matched pairs (GT, Pred, is_correct)
+
+            for gi, gt in enumerate(gt_anns):
+                best_iou, best_pi = 0, None
+                for pi, pred in enumerate(pred_anns):
+                    if pi in matched_pred:
+                        continue
+                    iou_val = iou(gt["bbox"], pred["bbox"])
+                    if iou_val > best_iou:
+                        best_iou, best_pi = iou_val, pi
+
+                if best_pi is not None and best_iou > 0.5:
+                    pred = pred_anns[best_pi]
+                    matched_gt.add(gi)
+                    matched_pred.add(best_pi)
+                    is_correct = (pred["label"] == gt["label"])
+                    matches.append((gt, pred, is_correct))
+                    if is_correct:
+                        img_stats["TP"] += 1
+                        class_stats[gt["label"]]["TP"] += 1
+                    else:
+                        img_stats["Misclass"] += 1
+                        class_stats[gt["label"]]["Misclass"] += 1
+                else:
+                    img_stats["FN"] += 1
+                    class_stats[gt["label"]]["FN"] += 1
+
+            for pi, pred in enumerate(pred_anns):
+                if pi not in matched_pred:
+                    img_stats["FP"] += 1
+                    class_stats[pred["label"]]["FP"] += 1
+
+            # ------------------------
+            # Visualization (TP, FP, FN, Misclass)
+            # ------------------------
+            vis_img = img.copy()
+
+            # ✅ True Positives (Green)
+            for gt, pred, is_correct in matches:
+                if is_correct:
+                    x1, y1, x2, y2 = gt["bbox"]
+                    cv2.rectangle(vis_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(vis_img, f"TP:{gt['label']}", (x1, y1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+            # ⬛ Misclassifications (Black) — show both GT and predicted label
+            for gt, pred, is_correct in matches:
+                if not is_correct:
+                    x1, y1, x2, y2 = gt["bbox"]
+                    cv2.rectangle(vis_img, (x1, y1), (x2, y2), (0, 0, 0), 2)
+                    text = f"Mis: {gt['label']}→{pred['label']}"
+                    cv2.putText(vis_img, text, (x1, y1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                    cv2.putText(vis_img, text, (x1, y1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)  # white overlay text for contrast
+
+            # 🟥 False Negatives (Red)
+            for gi, gt in enumerate(gt_anns):
+                if gi not in matched_gt:
+                    x1, y1, x2, y2 = gt["bbox"]
+                    cv2.rectangle(vis_img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    cv2.putText(vis_img, f"FN:{gt['label']}", (x1, y1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+            # 🟦 False Positives (Blue)
+            for pi, pred in enumerate(pred_anns):
+                if pi not in matched_pred:
+                    x1, y1, x2, y2 = pred["bbox"]
+                    cv2.rectangle(vis_img, (x1, y1), (x2, y2), (255, 0, 0), 2)
+                    cv2.putText(vis_img, f"FP:{pred['label']}", (x1, y1 - 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+
+            out_file = os.path.join(save_dir, f"{base_name}_analysis.jpg")
+            cv2.imwrite(out_file, vis_img)
+
+            per_image_stats.append(img_stats)
+
+        # ------------------------
+        # Save Stats
+        # ------------------------
+        df = pd.DataFrame(per_image_stats)
+        csv_path = os.path.join(save_dir, "detection_stats.csv")
+        if os.path.exists(csv_path):
+            df.to_csv(csv_path, mode="a", header=False, index=False)
+        else:
+            df.to_csv(csv_path, index=False)
+        print(f"Appended batch stats to {csv_path}")
+
+        return class_stats
+
+
+
+
+    def update_annotation_with_colour(self, batch_data_samples, anno_file, save_path, k=2, score_thr=0.3, iou_thresh = 0.7):
+
+        """
+        Update a copy of COCO annotation file by adding 'colour' attribute to annotations.
+        Increments 'colour' by k for each ground truth box that is NOT matched by predictions
+        (same matching rule as analyze_predictions).
+        """
+        # --- Step 1: Load or create copy of annotations ---
+        if os.path.exists(save_path):
+            with open(save_path, "r") as f:
+                coco_data = json.load(f)
+        else:
+            with open(anno_file, "r") as f:
+                coco_data = json.load(f)
+            # Initialize colour field
+            for ann in coco_data["annotations"]:
+                ann["colour"] = 0
+
+        coco_gt = COCO(anno_file)
+        
+        # Map image_id -> anns in modified file (we’ll edit these)
+        anns_by_img = {}
+        for ann in coco_data["annotations"]:
+            anns_by_img.setdefault(ann["image_id"], []).append(ann)
+
+        # --- Step 2: Loop through batch and apply same matching as analyze_predictions ---
+        def iou(boxA, boxB):
+            xA = max(boxA[0], boxB[0])
+            yA = max(boxA[1], boxB[1])
+            xB = min(boxA[2], boxB[2])
+            yB = min(boxA[3], boxB[3])
+            interArea = max(0, xB-xA) * max(0, yB-yA)
+            boxAArea = (boxA[2]-boxA[0])*(boxA[3]-boxA[1])
+            boxBArea = (boxB[2]-boxB[0])*(boxB[3]-boxB[1])
+            return interArea / float(boxAArea + boxBArea - interArea + 1e-6)
+
+        for data_sample in batch_data_samples:
+            img_path = data_sample.img_path
+            # Find img_id by filename
+            img_id = None
+            for i in coco_gt.getImgIds():
+                info = coco_gt.loadImgs([i])[0]
+                # print("info['file_name']", info['file_name'] )
+                # print("os.path.basename(img_path)", os.path.basename(img_path))
+                if info['file_name'] == os.path.basename(img_path):
+                    img_id = i
+                    break
+            if img_id is None:
+                print("yp")
+                continue
+
+            # Load GT anns (from original COCO)
+            ann_ids = coco_gt.getAnnIds(imgIds=[img_id])
+
+            anns = coco_gt.loadAnns(ann_ids)
+            gt_anns = []
+            if img_id is not None:
+                ann_ids = coco_gt.getAnnIds(imgIds=[img_id])
+                anns = coco_gt.loadAnns(ann_ids)
+                for ann in anns:
+                    x, y, w, h = map(int, ann["bbox"])
+                    cat_name = coco_gt.loadCats([ann["category_id"]])[0]["name"]
+                    gt_anns.append({"bbox":[x,y,x+w,y+h], "label":cat_name, "id":ann["id"]})
+
+            # Predictions
+            pred = data_sample.pred_instances
+            bboxes = pred.bboxes.cpu().numpy()
+            scores = pred.scores.cpu().numpy()
+            labels = pred.label_names if hasattr(pred, "label_names") else pred.labels.cpu().numpy()
+            # print("bbx: ", len(bboxes), "score; ", scores, "labels: ", labels)
+            pred_anns = []
+            for bbox, score, label in zip(bboxes, scores, labels):
+                if score < score_thr:
+                    continue
+                x1, y1, x2, y2 = map(int, bbox)
+                pred_anns.append({"bbox":[x1,y1,x2,y2], "label":label, "score":score})
+            # Matching (same as analyze_predictions)
+            matched_gt = set()
+            matched_pred = set()
+            for gi, gt in enumerate(gt_anns):
+                best_iou, best_pi = 0, None
+                for pi, pred in enumerate(pred_anns):
+                    if pi in matched_pred: 
+                        continue
+                    iou_val = iou(gt["bbox"], pred["bbox"])
+                    if iou_val > best_iou:
+                        best_iou, best_pi = iou_val, pi
+                if best_pi is not None and (best_iou > iou_thresh) and pred_anns[best_pi]["label"] == gt["label"]:
+                    print("label: ", gt["label"])
+                    matched_gt.add(gi)
+                    matched_pred.add(best_pi)
+
+            # Now increment colour for unmatched GTs (FNs)
+            # print("gt_anns" , gt_anns)
+            for gi, gt in enumerate(gt_anns):
+                if gi not in matched_gt:
+                    # find the annotation in coco_data and bump its colour
+                    for ann in anns_by_img[img_id]:
+                        if ann["id"] == gt["id"]:
+                            ann["colour"] += k
+                            break
+
+        # --- Step 3: Save updates ---
+        with open(save_path, "w") as f:
+            json.dump(coco_data, f, indent=2)
+
+
+
     def predict(self, batch_inputs, batch_data_samples, rescale: bool = True):
         text_prompts = []
         enhanced_text_prompts = []
@@ -930,211 +1341,24 @@ class HybridDINO(DINO):
                 # for visualization
                 pred_instances.label_names = label_names
             data_sample.pred_instances = pred_instances
+        # if self.training:
+        #     return batch_data_samples
+        
 
-        # save_dir = "/home/poonam_rajput/scratch/mmdetection/test_outputs/results_analysis"
-        # anno_file = "/home/poonam_rajput/scratch/dataset/RSUD_dataset/annotations/instances_test2017.json"
+        """Save predictions, draw GT & Pred side-by-side.
+
+        Args:
+            batch_data_samples (list): Output from `self.predict(...)`.
+            save_dir (str): Directory to save results.
+            anno_file (str): Path to COCO-style annotation file.
+            score_thr (float): Score threshold for predictions.
+        """
+        # save_dir = '/home/tushar/scratch/mmdetection/test_outputs/hdino'
+        # anno_file = '/home/tushar/scratch/dataset/RSUD_dataset/annotations/instances_test2017.json'
         # score_thr = 0.3
         # iou_thr=0.5
-        # self.analyze_predictions(batch_data_samples, save_dir, anno_file, score_thr)
+        # self.update_annotation_with_colour(batch_data_samples, anno_file, save_path = save_dir + '/colour.json', k = 2,score_thr=0.3, iou_thresh=0.7)
+        # self.analyze_predictions(batch_data_samples, save_dir,anno_file, score_thr)
         return batch_data_samples
 
 
-    def analyze_predictions(self, batch_data_samples, save_dir, anno_file, score_thr=0.3):
-        os.makedirs(save_dir, exist_ok=True)
-
-        # Load COCO GT annotations
-        coco_gt = COCO(anno_file)
-        categories = coco_gt.loadCats(coco_gt.getCatIds())
-        category_name_to_id = {c["name"]: c["id"] for c in categories}
-
-        # Collect per-image stats
-        per_image_stats = []
-        class_stats = defaultdict(lambda: {"TP": 0, "FP": 0, "FN": 0, "Misclass": 0, "BBoxError": 0})
-
-        # Lists to hold FPs and FNs
-        false_positive_list = []
-        false_negative_list = []
-        image_list = []
-        ann_list = []
-
-        for data_sample in batch_data_samples:
-            img_path = data_sample.img_path
-            img = cv2.imread(img_path)
-            base_name = os.path.splitext(os.path.basename(img_path))[0]
-
-            # ------------------------
-            # Ground Truth
-            # ------------------------
-            img_id = None
-            for i in coco_gt.getImgIds():
-                info = coco_gt.loadImgs([i])[0]
-                if info['file_name'] == os.path.basename(img_path):
-                    img_id = i
-                    img_info = info
-                    break
-
-            gt_anns = []
-            if img_id is not None:
-                ann_ids = coco_gt.getAnnIds(imgIds=[img_id])
-                anns = coco_gt.loadAnns(ann_ids)
-                for ann in anns:
-                    x, y, w, h = map(int, ann["bbox"])
-                    cat_name = coco_gt.loadCats([ann["category_id"]])[0]["name"]
-                    gt_anns.append({"bbox": [x, y, x + w, y + h],
-                                    "label": cat_name,
-                                    "ann_id": ann["id"],
-                                    "category_id": ann["category_id"]})
-
-            # ------------------------
-            # Predictions
-            # ------------------------
-            pred = data_sample.pred_instances
-            bboxes = pred.bboxes.cpu().numpy()
-            scores = pred.scores.cpu().numpy()
-            labels = pred.label_names if hasattr(pred, "label_names") else pred.labels.cpu().numpy()
-
-            pred_anns = []
-            for bbox, score, label in zip(bboxes, scores, labels):
-                if score < score_thr:
-                    continue
-                x1, y1, x2, y2 = map(int, bbox)
-                pred_anns.append({"bbox": [x1, y1, x2, y2],
-                                "label": label,
-                                "score": float(score)})
-
-            # ------------------------
-            # Stats Calculation
-            # ------------------------
-            img_stats = {"image": base_name, "TotalBoxes": 0,
-                        "TP": 0, "FP": 0, "FN": 0, "Misclass": 0, "BBoxError": 0}
-
-            matched_gt = set()
-            matched_pred = set()
-
-            def iou(boxA, boxB):
-                xA = max(boxA[0], boxB[0])
-                yA = max(boxA[1], boxB[1])
-                xB = min(boxA[2], boxB[2])
-                yB = min(boxA[3], boxB[3])
-                interArea = max(0, xB - xA) * max(0, yB - yA)
-                boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-                boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-                return interArea / float(boxAArea + boxBArea - interArea + 1e-6)
-
-            img_stats["TotalBoxes"] = len(gt_anns)
-
-            # Match GT to predictions
-            for gi, gt in enumerate(gt_anns):
-                best_iou, best_pi = 0, None
-                for pi, pred in enumerate(pred_anns):
-                    if pi in matched_pred:
-                        continue
-                    iou_val = iou(gt["bbox"], pred["bbox"])
-                    if iou_val > best_iou:
-                        best_iou, best_pi = iou_val, pi
-
-                if best_pi is not None and best_iou > 0.5:
-                    pred = pred_anns[best_pi]
-                    matched_gt.add(gi)
-                    matched_pred.add(best_pi)
-                    if pred["label"] == gt["label"]:
-                        img_stats["TP"] += 1
-                        class_stats[gt["label"]]["TP"] += 1
-                        if best_iou < 0.75:
-                            img_stats["BBoxError"] += 1
-                            class_stats[gt["label"]]["BBoxError"] += 1
-                    else:
-                        img_stats["Misclass"] += 1
-                        class_stats[gt["label"]]["Misclass"] += 1
-                else:
-                    img_stats["FN"] += 1
-                    class_stats[gt["label"]]["FN"] += 1
-                    # Save FN as missed GT
-                    fn_ann = {
-                        "id": gt["ann_id"],
-                        "image_id": img_id,
-                        "category_id": gt["category_id"],
-                        "bbox": [gt["bbox"][0], gt["bbox"][1],
-                                gt["bbox"][2] - gt["bbox"][0],
-                                gt["bbox"][3] - gt["bbox"][1]],
-                        "iscrowd": 0,
-                        "area": (gt["bbox"][2] - gt["bbox"][0]) * (gt["bbox"][3] - gt["bbox"][1])
-                    }
-                    false_negative_list.append(fn_ann)
-                    if img_info not in image_list:
-                        image_list.append(img_info)
-
-            # Collect FPs
-            for pi, pred in enumerate(pred_anns):
-                if pi not in matched_pred:
-                    img_stats["FP"] += 1
-                    class_stats[pred["label"]]["FP"] += 1
-                    fp_det = {
-                        "image_id": img_id,
-                        "category_id": category_name_to_id.get(pred["label"], -1),
-                        "bbox": [pred["bbox"][0], pred["bbox"][1],
-                                pred["bbox"][2] - pred["bbox"][0],
-                                pred["bbox"][3] - pred["bbox"][1]],
-                        "score": pred["score"]
-                    }
-                    false_positive_list.append(fp_det)
-
-            per_image_stats.append(img_stats)
-
-        # ------------------------
-        # Save per-image CSV stats
-        # ------------------------
-        df = pd.DataFrame(per_image_stats)
-        csv_file = "detection_stats.csv"
-        csv_path = os.path.join(save_dir, csv_file)
-        if os.path.exists(csv_path):
-            df.to_csv(csv_path, mode="a", header=False, index=False)
-        else:
-            df.to_csv(csv_path, index=False)
-        print(f"Appended batch stats to {csv_path}")
-
-        # ------------------------
-        # Save FP (append mode)
-        # ------------------------
-        fp_path = os.path.join(save_dir, "false_positives.json")
-        if os.path.exists(fp_path) and os.path.getsize(fp_path) > 0:
-            try:
-                with open(fp_path, "r") as f:
-                    existing_fps = json.load(f)
-            except json.JSONDecodeError:
-                existing_fps = []
-        else:
-            existing_fps = []
-        existing_fps.extend(false_positive_list)
-        with open(fp_path, "w") as f:
-            json.dump(existing_fps, f)
-        print(f"Appended False Positives to {fp_path}")
-
-        # ------------------------
-        # Save FN (append mode, COCO-style)
-        # ------------------------
-        fn_path = os.path.join(save_dir, "false_negatives.json")
-        if os.path.exists(fn_path):
-            with open(fn_path, "r") as f:
-                existing_fns = json.load(f)
-            existing_fns["annotations"].extend(false_negative_list)
-
-            # merge images (avoid duplicates by image_id)
-            existing_image_ids = {img["id"] for img in existing_fns["images"]}
-            for img in image_list:
-                if img["id"] not in existing_image_ids:
-                    existing_fns["images"].append(img)
-            fn_json = existing_fns
-        else:
-            fn_json = {
-                "images": image_list,
-                "annotations": false_negative_list,
-                "categories": categories
-            }
-
-        with open(fn_path, "w") as f:
-            json.dump(fn_json, f)
-        print(f"Appended False Negatives to {fn_path}")
-
-
-        return class_stats
