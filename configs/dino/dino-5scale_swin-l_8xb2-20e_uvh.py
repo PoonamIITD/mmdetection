@@ -1,7 +1,7 @@
 _base_ = './dino-5scale_swin-l_8xb2-12e_coco.py'
 
 load_from = "/home/poonam_rajput/scratch/mmdetection/checkpoints/dino-5scale_swin-l_8xb2-36e_coco-5486e051.pth"
-max_epochs = 20
+max_epochs = 30
 
 train_cfg = dict(
     type='EpochBasedTrainLoop', max_epochs=max_epochs, val_interval=1)
