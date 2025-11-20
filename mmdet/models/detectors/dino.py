@@ -120,6 +120,80 @@ class DINO(DeformableDETR):
         decoder_inputs_dict.update(tmp_dec_in)
 
         decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
+        
+        # --- Iterative refinement during inference ---
+        # if not self.training:
+        #     num_iters = 3
+        #     sigma_base = 0.02
+
+        #     current_dec_out = decoder_outputs_dict
+
+        #     for i in range(num_iters):
+        #         # Step 1: Predict current boxes and scores
+        #         temp_head_input_dict = head_inputs_dict.copy()
+        #         temp_head_input_dict.update(current_dec_out)
+
+        #         results_list = self.bbox_head.predict(
+        #             **temp_head_input_dict,
+        #             rescale=False,
+        #             batch_data_samples=batch_data_samples)
+
+        #         scores = results_list[0]['scores'].unsqueeze(0).unsqueeze(-1)  # [bs, num_queries, 1]
+        #         conf = scores.clamp(0, 1)
+
+        #         # Step 2: Directional + random noise addition
+        #         last_refs = current_dec_out['references'][-1].detach()  # [bs, num_queries, 4]
+        #         hidden_state = current_dec_out['hidden_states'][-1].detach()  # last decoder output
+
+        #         # --- get directional offsets from regression branch ---
+        #         if isinstance(self.bbox_head.reg_branches, (list, torch.nn.ModuleList)):
+        #             reg_branch = self.bbox_head.reg_branches[-1]
+        #         else:
+        #             reg_branch = self.bbox_head.reg_branches
+
+        #         bbox_deltas = reg_branch(hidden_state)
+        #         bbox_deltas = torch.tanh(bbox_deltas) * 0.05  # small directional adjustment
+
+        #         # --- compute box size ---
+        #         box_wh = last_refs[..., 2:]  # [w, h]
+        #         box_area = (box_wh[..., 0] * box_wh[..., 1]).unsqueeze(-1)  # [bs, num_queries, 1]
+
+        #         # scale deltas by box area (to avoid over-moving large boxes)
+        #         bbox_deltas = bbox_deltas * box_area.clamp(0.2, 1.0)
+
+        #         # confidence-aware + iteration-decayed noise
+        #         sigma_iter = sigma_base * (0.8 ** i)
+        #         sigma_scale = sigma_iter * torch.exp(-1.0 * conf)
+
+        #         # --- random noise component ---
+        #         torch.manual_seed(42)
+        #         rand_noise = torch.randn_like(last_refs)
+        #         rand_noise[..., :2] *= sigma_scale * last_refs[..., 2:]
+        #         rand_noise[..., 2:] *= sigma_scale * 0.5
+
+        #         # --- combine random + directional ---
+        #         noise = (1 - conf) * rand_noise + conf * bbox_deltas
+
+        #         # --- blend proposals ---
+        #         alpha = 0.7
+        #         noisy_refs = (last_refs + noise).clamp(0, 1)
+        #         blended_refs = alpha * last_refs + (1 - alpha) * noisy_refs
+
+        #         # --- freeze confident and small boxes ---
+        #         conf_mask = (conf < 0.8).float()
+        #         # Small boxes defined by area < 0.02 (tune threshold as needed)
+        #         small_mask = (box_area > 0.02).float()  # only move boxes with area > 0.02
+        #         move_mask = conf_mask * small_mask
+
+        #         final_refs = move_mask * blended_refs + (1 - move_mask) * last_refs
+
+        #         # Step 3: Re-decode with refined proposals
+        #         decoder_inputs_dict['reference_points'] = final_refs
+        #         current_dec_out = self.forward_decoder(**decoder_inputs_dict)
+
+        #     # --- after all iterations, use final outputs ---
+        #     decoder_outputs_dict = current_dec_out
+        
         head_inputs_dict.update(decoder_outputs_dict)
         return head_inputs_dict
 
