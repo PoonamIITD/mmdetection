@@ -127,11 +127,12 @@ class HybridDINO(DINO):
         for param in self.text_feat_map.parameters():
             param.requires_grad = False
         
-        # for param in self.encoder.parameters():
-        #     param.requires_grad = False
-
-        for param in self.text_encoder.parameters():
+        for param in self.encoder.parameters():
             param.requires_grad = False
+
+        for param in self.text_encoder.parameters():    
+            param.requires_grad = False
+    
         # for param in self.dino_encoder.parameters():
         #     param.requires_grad = False
 
@@ -142,142 +143,83 @@ class HybridDINO(DINO):
 
 
     def init_weights(self):
-        """Initialize HybridDINO with GDINO (backbone+encoder) + DINO (decoder+head)."""
+        """Initialize HybridDINO with GDINO encoder + DINO decoder."""
         super(DeformableDETR, self).init_weights()
         from mmengine import MMLogger
 
         logger = MMLogger.get_current_instance()
-        # GDINO_swin-l_pretrained_rsud_best_mAP_epoch_19.pth
-        gdino_ckpt = torch.load(
-            '/home/poonam_rajput/scratch/mmdetection/checkpoints/GDINO_swin-l_uvh_best_coco_bbox_mAP_epoch_19.pth',
-            map_location='cpu'
-        )['state_dict']
-        dino_ckpt = torch.load(
-            '/home/poonam_rajput/scratch/mmdetection/checkpoints/DINO-swin-l_uvh_best_coco_bbox_mAP_epoch_20.pth',
-            map_location='cpu'
-        )['state_dict']
 
-        # -------- GDINO: text_feat_map --------
-        if hasattr(self, "text_feat_map"):
-            text_feat_map_weights = {
-                k.replace("text_feat_map.", ""): v
-                for k, v in gdino_ckpt.items() if k.startswith("text_feat_map.")
-            }
+        # ---------- Load checkpoints (CPU only) ----------
+        with torch.no_grad():
+            gdino_ckpt = torch.load(
+                # '/home/poonam_rajput/scratch/mmdetection/checkpoints/grounding_dino_swin-l_pretrain_all-56d69e78.pth',
+                '/home/poonam_rajput/scratch/mmdetection/checkpoints/GDINO_swin-l_pretrained_rsud_best_mAP_epoch_19.pth',
+                map_location='cpu'
+            )['state_dict']
 
-            missing, unexpected = self.text_feat_map.load_state_dict(text_feat_map_weights, strict=True)
-            # print(self.backbone.state_dict().keys())
-            # print([k for k in gdino_ckpt.keys() if k.startswith("backbone.")])
+            dino_ckpt = torch.load(
+                # '/home/poonam_rajput/scratch/mmdetection/checkpoints/dino-5scale_swin-l_8xb2-36e_coco-5486e051.pth',
+                '/home/poonam_rajput/scratch/mmdetection/checkpoints/DINO-swin-L_pretrained_rsud_best_epoch_16.pth',
+                map_location='cpu'
+            )['state_dict']
+            dino_ckpt_coco = torch.load(
+                '/home/poonam_rajput/scratch/mmdetection/checkpoints/dino-5scale_swin-l_8xb2-36e_coco-5486e051.pth',
+                # '/home/poonam_rajput/scratch/mmdetection/checkpoints/DINO-swin-L_pretrained_rsud_best_epoch_16.pth',
+                map_location='cpu'
+            )['state_dict']
 
-            logger.info(f"[GDINO] Loaded text_feat_map | missing={len(missing)}, unexpected={len(unexpected)}")
+        # # ---------- Remove COCO-specific weights ----------
+        # for k in list(dino_ckpt.keys()):
+        #     if "cls_branches" in k or "dn_query_generator.label_embedding" in k:
+        #         del dino_ckpt[k]
 
-        # -------- GDINO: text_feat_map --------
-        if hasattr(self, "language_model"):
-            language_model_weights = {
-                k.replace("language_model.", ""): v
-                for k, v in gdino_ckpt.items() if k.startswith("language_model.")
-            }
+        # ---------- Helper function ----------
+        def load_module(prefix, module, ckpt, strict=True, allow_missing=False):
+            with torch.no_grad():
+                weights = {
+                    k.replace(prefix + ".", ""): v
+                    for k, v in ckpt.items() if k.startswith(prefix)
+                }
+                missing, unexpected = module.load_state_dict(
+                    weights, strict=strict)
+                logger.info(
+                    f"[LOAD] {prefix} | missing={len(missing)} unexpected={len(unexpected)}"
+                )
 
-            missing, unexpected = self.language_model.load_state_dict(language_model_weights, strict=True)
-            # print(self.backbone.state_dict().keys())
-            # print([k for k in gdino_ckpt.keys() if k.startswith("backbone.")])
+        # ---------- GDINO loads ----------
+        load_module("text_feat_map", self.text_feat_map, gdino_ckpt)
+        load_module("language_model", self.language_model, gdino_ckpt)
+        load_module("backbone", self.backbone, gdino_ckpt)
+        load_module("neck", self.neck, gdino_ckpt)
+        load_module("positional_encoding", self.positional_encoding, gdino_ckpt)
+        load_module("encoder", self.text_encoder, gdino_ckpt)
 
-            logger.info(f"[GDINO] Loaded language_model | missing={len(missing)}, unexpected={len(unexpected)}")
-        
-        # -------- GDINO: backbone --------
-        if hasattr(self, "backbone"):
-            backbone_weights = {
-                k.replace("backbone.", ""): v
-                for k, v in gdino_ckpt.items() if k.startswith("backbone.")
-            }
-
-            missing, unexpected = self.backbone.load_state_dict(backbone_weights, strict=True)
-            # print(self.backbone.state_dict().keys())
-            # print([k for k in gdino_ckpt.keys() if k.startswith("backbone.")])
-
-            logger.info(f"[GDINO] Loaded backbone | missing={len(missing)}, unexpected={len(unexpected)}")
-
-
-        # -------- GDINO: neck --------
-        if hasattr(self, "neck"):
-            neck_weights = {
-                k.replace("neck.", ""): v
-                for k, v in gdino_ckpt.items() if k.startswith("neck.")
-            }
-            missing, unexpected = self.neck.load_state_dict(neck_weights, strict=True)
-            logger.info(f"[GDINO] Loaded neck | missing={len(missing)}, unexpected={len(unexpected)}")
-
-        # -------- GDINO: positional_encoding --------
-        if hasattr(self, "positional_encoding"):
-            positional_encoding_weights = {
-                k.replace("positional_encoding.", ""): v
-                for k, v in gdino_ckpt.items() if k.startswith("positional_encoding.")
-            }
-
-            missing, unexpected = self.positional_encoding.load_state_dict(positional_encoding_weights, strict=True)
-            logger.info(f"[GDINO] Loaded positional_encoding | missing={len(missing)}, unexpected={len(unexpected)}")
-
-        # -------- GDINO: level_embed --------
+        # level_embed (special case)
         if "level_embed" in gdino_ckpt:
             with torch.no_grad():
                 self.level_embed.copy_(gdino_ckpt["level_embed"])
-            logger.info("[GDINO] Loaded level_embed from checkpoint")
-        else:
-            logger.warning("[GDINO] level_embed not found in checkpoint — using random init")
 
-        # -------- GDINO: text_encoder --------
-        if hasattr(self, "text_encoder"):
-            encoder_weights = {
-                k.replace("encoder.", ""): v
-                for k, v in gdino_ckpt.items() if k.startswith("encoder.")
-            }
-            missing, unexpected = self.text_encoder.load_state_dict(encoder_weights, strict=True)
-            logger.info(f"[GDINO] Loaded text_encoder | missing={len(missing)}, unexpected={len(unexpected)}")
+        # ---------- DINO loads ----------
+        load_module("encoder", self.encoder, dino_ckpt)
+        load_module("decoder", self.decoder, dino_ckpt_coco)
+        load_module("query_embedding", self.query_embedding, dino_ckpt_coco)
 
-
-        # -------- DINO: encoder --------
-        if hasattr(self, "encoder"):
-            encoder_weights = {
-                k.replace("encoder.", ""): v
-                for k, v in dino_ckpt.items() if k.startswith("encoder.")
-            }
-            missing, unexpected = self.encoder.load_state_dict(encoder_weights, strict=True)
-            logger.info(f"[DINO] Loaded encoder | missing={len(missing)}, unexpected={len(unexpected)}")
-
-        # -------- DINO: decoder --------
-        if hasattr(self, "decoder"):
-            decoder_weights = {
-                k.replace("decoder.", ""): v
-                for k, v in dino_ckpt.items() if k.startswith("decoder.")
-            }
-            missing, unexpected = self.decoder.load_state_dict(decoder_weights, strict=True)
-            logger.info(f"[DINO] Loaded decoder | missing={len(missing)}, unexpected={len(unexpected)}")
-
-        # -------- DINO: bbox_head --------
+        # bbox_head and dn_query_generator allow missing keys
         if hasattr(self, "bbox_head"):
-            head_weights = {
-                k.replace("bbox_head.", ""): v
-                for k, v in dino_ckpt.items() if k.startswith("bbox_head.")
-            }
-            missing, unexpected = self.bbox_head.load_state_dict(head_weights, strict=False)
-            logger.info(f"[DINO] Loaded bbox_head | missing={len(missing)}, unexpected={len(unexpected)}")
-
-        if hasattr(self, "query_embedding"):
-            query_embedding_weights = {
-                k.replace("query_embedding.", ""): v
-                for k, v in dino_ckpt.items() if k.startswith("query_embedding.")
-            }
-
-            missing, unexpected = self.query_embedding.load_state_dict(query_embedding_weights, strict=True)
-            logger.info(f"[DINO] Loaded query_embedding | missing={len(missing)}, unexpected={len(unexpected)}")
+            load_module("bbox_head", self.bbox_head, dino_ckpt, strict=True)
 
         if hasattr(self, "dn_query_generator"):
-            dn_query_generator_weights = {
-                k.replace("dn_query_generator.", ""): v
-                for k, v in dino_ckpt.items() if k.startswith("dn_query_generator.")
-            }
+            load_module("dn_query_generator", self.dn_query_generator,
+                        dino_ckpt, strict=True)
 
-            missing, unexpected = self.dn_query_generator.load_state_dict(dn_query_generator_weights, strict=True)
-            logger.info(f"[DINO] Loaded dn_query_generator | missing={len(missing)}, unexpected={len(unexpected)}")
+        # ---------- Free checkpoint memory ----------
+        del gdino_ckpt
+        del dino_ckpt
+        del dino_ckpt_coco
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
 
     def to_enhance_text_prompts(self, original_caption, enhanced_text_prompts):
         caption_string = ''
