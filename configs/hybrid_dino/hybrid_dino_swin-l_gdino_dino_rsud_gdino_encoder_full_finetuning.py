@@ -67,7 +67,7 @@ model = dict(
         norm_cfg=dict(type='GN', num_groups=32),
         num_outs=num_levels
     ),
-    encoder=dict(
+    text_encoder=dict(
         num_layers=6,
         num_cp=6,
         # visual layer config
@@ -88,6 +88,15 @@ model = dict(
             num_heads=4,
             init_values=1e-4),
     ),
+    encoder=dict(
+        num_layers=6,
+        layer_cfg=dict(
+            self_attn_cfg=dict(embed_dims=256, num_levels=num_levels,
+                               dropout=0.0),  # 0.1 for DeformDETR
+            ffn_cfg=dict(
+                embed_dims=256,
+                feedforward_channels=2048,  # 1024 for DeformDETR
+                ffn_drop=0.0))),  # 0.1 for DeformDETR
     decoder=dict(
         num_layers=6,
         return_intermediate=True,
@@ -207,12 +216,12 @@ val_dataloader = dict(
         type='CocoDataset',
         metainfo=metainfo,
         data_root=data_root,
-        ann_file='annotations/instances_test2017.json',
-        data_prefix=dict(img='images/test')))
+        ann_file='annotations/instances_val2017.json',
+        data_prefix=dict(img='images/val')))
 
 test_dataloader = val_dataloader
 
-val_evaluator = dict(ann_file=data_root + 'annotations/instances_test2017.json')
+val_evaluator = dict(ann_file=data_root + 'annotations/instances_val2017.json')
 test_evaluator = val_evaluator
 
 max_epoch = 15

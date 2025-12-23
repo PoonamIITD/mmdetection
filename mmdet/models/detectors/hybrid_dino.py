@@ -93,6 +93,9 @@ class HybridDINO(DINO):
         # Encoder from GroundingDINO
         self.text_encoder = GroundingDinoTransformerEncoder(**self.text_encoder)
         self.encoder = DeformableDetrTransformerEncoder(**self.encoder)
+
+        # self.encoder = GroundingDinoTransformerEncoder(**self.encoder)
+
         # Decoder from DINO
         self.decoder = DinoTransformerDecoder(**self.decoder)
         self.embed_dims = self.encoder.embed_dims
@@ -127,8 +130,8 @@ class HybridDINO(DINO):
         for param in self.text_feat_map.parameters():
             param.requires_grad = False
         
-        # for param in self.encoder.parameters():
-        #     param.requires_grad = False
+        for param in self.encoder.parameters():
+            param.requires_grad = False
 
         for param in self.text_encoder.parameters():
             param.requires_grad = False
@@ -545,6 +548,8 @@ class HybridDINO(DINO):
     ) -> Dict:
 
         # ---- GDINO encoder forward ----
+        
+        # memory, memory_text = self.encoder(
         image_value, memory_text = self.text_encoder(
             query=feat,
             query_pos=feat_pos,
@@ -602,6 +607,52 @@ class HybridDINO(DINO):
         # binary classification.
         topk_indices = torch.topk(
             enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
+        
+        # =========================================================
+        # DEBUG: dump ALL encoder proposals (TEST ONLY, SUBSET ONLY)
+        # =========================================================
+        if (not self.training) and batch_data_samples is not None:
+            # test.py → bs == 1
+            data_sample = batch_data_samples[0]
+            img_meta = data_sample.metainfo
+            img_path = img_meta["img_path"]
+            image_name = os.path.basename(img_path)
+
+            os.makedirs("enc_all_props_json", exist_ok=True)
+
+            def to_list(x):
+                return x.detach().cpu().tolist()
+
+            dump = {
+                "image_name": image_name,
+                "num_encoder_tokens": int(enc_outputs_class.shape[1]),
+                "num_classes": int(enc_outputs_class.shape[-1]),
+                "num_queries": int(self.num_queries),
+
+                # ALL encoder outputs
+                "enc_outputs_class": to_list(enc_outputs_class[0]),
+                "enc_outputs_coord_unact": to_list(
+                    enc_outputs_coord_unact[0]
+                ),
+
+                # decoder selection info
+                "topk_indices": to_list(topk_indices[0]),
+
+                # optional but very useful
+                "spatial_shapes": to_list(spatial_shapes),
+            }
+
+            out_file = os.path.join(
+                "enc_all_props_json",
+                image_name.replace(".jpg", "_enc_all.json")
+            )
+
+            with open(out_file, "w") as f:
+                json.dump(dump, f)
+        # =========================================================
+        # END DEBUG
+        # =========================================================
+        
         topk_score = torch.gather(
             enc_outputs_class, 1,
             topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
@@ -626,6 +677,7 @@ class HybridDINO(DINO):
 
         decoder_inputs_dict = dict(
             query=query,
+            # memory=memory,
             memory=image_value,
             reference_points=reference_points,
             # memory_per_layer = memory_per_layer,
