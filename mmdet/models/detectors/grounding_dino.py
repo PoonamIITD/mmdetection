@@ -19,6 +19,11 @@ from .dino import DINO
 from .glip import (create_positive_map, create_positive_map_label_to_token,
                    run_ner)
 
+import os
+import h5py
+import numpy as np
+from filelock import FileLock
+
 
 def clean_label_name(name: str) -> str:
     name = re.sub(r'\(.*\)', '', name)
@@ -373,6 +378,63 @@ class GroundingDINO(DINO):
         # binary classification.
         topk_indices = torch.topk(
             enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
+        
+        def to_numpy(x):
+            return x.detach().cpu().numpy()
+
+        if (not self.training) and batch_data_samples is not None:
+            data_sample = batch_data_samples[0] 
+            img_meta = data_sample.metainfo 
+            image_name = ( img_meta.get("ori_filename", None) 
+                          or img_meta.get("file_name", None) or 
+                          img_meta.get("filename", None) ) 
+            if image_name is None and "img_path" in img_meta:
+                image_name = os.path.basename(img_meta["img_path"])
+
+            if image_name is not None:
+                root_dir = os.getcwd()
+                dump_dir = os.path.join(root_dir, "enc_all_props")
+                os.makedirs(dump_dir, exist_ok=True)
+
+                h5_path = os.path.join(dump_dir, "enc_all_props_gdino.h5")
+                lock_path = h5_path + ".lock"
+
+                with FileLock(lock_path):
+                    with h5py.File(h5_path, "a") as f:
+                        root = f.require_group("images")
+
+                        if image_name not in root:
+                            g = root.create_group(image_name)
+
+                            g.create_dataset(
+                                "enc_outputs_class",
+                                data=to_numpy(enc_outputs_class[0]),
+                                compression="gzip",
+                                compression_opts=4
+                            )
+
+                            g.create_dataset(
+                                "enc_outputs_coord_unact",
+                                data=to_numpy(enc_outputs_coord_unact[0]),
+                                compression="gzip",
+                                compression_opts=4
+                            )
+
+                            g.create_dataset(
+                                "topk_indices",
+                                data=to_numpy(topk_indices[0]),
+                                compression="gzip"
+                            )
+
+                            g.create_dataset(
+                                "spatial_shapes",
+                                data=to_numpy(spatial_shapes),
+                                compression="gzip"
+                            )
+
+                            g.attrs["num_encoder_tokens"] = int(enc_outputs_class.shape[1])
+                            g.attrs["num_classes"] = int(enc_outputs_class.shape[-1])
+                            g.attrs["num_queries"] = int(self.num_queries)
 
         topk_score = torch.gather(
             enc_outputs_class, 1,

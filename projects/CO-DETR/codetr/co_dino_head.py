@@ -140,7 +140,8 @@ class CoDINOHead(DINOHead):
                 dn_bbox_query,
                 attn_mask,
                 reg_branches=self.reg_branches if self.with_box_refine else None,  # noqa:E501
-                cls_branches=self.cls_branches if self.as_two_stage else None  # noqa:E501
+                cls_branches=self.cls_branches if self.as_two_stage else None,  # noqa:E501
+                img_metas=img_metas
             )
         outs = []
         num_level = len(mlvl_feats)

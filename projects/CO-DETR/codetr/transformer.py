@@ -1,6 +1,9 @@
 import math
 import warnings
 
+import os
+import h5py
+from filelock import FileLock
 import torch
 import torch.nn as nn
 from mmcv.cnn import build_norm_layer
@@ -1120,6 +1123,7 @@ class CoDinoTransformer(CoDeformableDetrTransformer):
                 attn_mask,
                 reg_branches=None,
                 cls_branches=None,
+                img_metas=None,
                 **kwargs):
         assert self.as_two_stage and query_embed is None, \
             'as_two_stage must be True for DINO'
@@ -1180,6 +1184,100 @@ class CoDinoTransformer(CoDeformableDetrTransformer):
         topk = self.two_stage_num_proposals
         # NOTE In DeformDETR, enc_outputs_class[..., 0] is used for topk
         topk_indices = torch.topk(enc_outputs_class.max(-1)[0], topk, dim=1)[1]
+
+        # =========================================================
+        # DEBUG: dump ALL encoder proposals (TEST ONLY)
+        # =========================================================
+        # if (not self.training) and img_metas is not None:
+        #     import os 
+        #     import json
+
+        #     image_name = os.path.basename(img_metas[0]["img_path"])
+
+        #     os.makedirs("enc_all_props_json", exist_ok=True)
+
+        #     def to_list(x):
+        #         return x.detach().cpu().tolist()
+
+        #     dump = {
+        #         "image_name": image_name,
+        #         "num_encoder_tokens": int(enc_outputs_class.shape[1]),
+        #         "num_classes": int(enc_outputs_class.shape[-1]),
+        #         "num_queries": int(topk),
+
+        #         # [N_enc, C]
+        #         "enc_outputs_class": to_list(enc_outputs_class[0]),
+
+        #         # [N_enc, 4]  (UNACTIVATED — CORRECT)
+        #         "enc_outputs_coord_unact": to_list(enc_outputs_coord_unact[0]),
+
+        #         # [topk]
+        #         "topk_indices": to_list(topk_indices[0]),
+
+        #         # multilevel info (for debugging / sanity)
+        #         "spatial_shapes": to_list(spatial_shapes),
+        #     }
+
+        #     out_file = os.path.join(
+        #         "enc_all_props_json",
+        #         image_name.replace(".jpg", "_enc_all.json")
+        #     )
+
+        #     with open(out_file, "w") as f:
+        #         json.dump(dump, f)
+
+        # =========================================================
+
+        if (not self.training) and img_metas is not None:
+            image_name = os.path.basename(img_metas[0]["img_path"])
+
+            os.makedirs("../../enc_all_props", exist_ok=True)
+            h5_path = "../../enc_all_props/enc_all_props_codino.h5"
+            lock_path = h5_path + ".lock"
+
+            def to_numpy(x):
+                return x.detach().cpu().numpy()
+
+            with FileLock(lock_path):
+                with h5py.File(h5_path, "a") as f:
+                    root = f.require_group("images")
+
+                    if image_name in root:
+                        return
+
+                    g = root.create_group(image_name)
+
+                    g.create_dataset(
+                        "enc_outputs_class",
+                        data=to_numpy(enc_outputs_class[0]),
+                        compression="gzip",
+                        compression_opts=4
+                    )
+
+                    g.create_dataset(
+                        "enc_outputs_coord_unact",
+                        data=to_numpy(enc_outputs_coord_unact[0]),
+                        compression="gzip",
+                        compression_opts=4
+                    )
+
+                    g.create_dataset(
+                        "topk_indices",
+                        data=to_numpy(topk_indices[0]),
+                        compression="gzip"
+                    )
+
+                    g.create_dataset(
+                        "spatial_shapes",
+                        data=to_numpy(spatial_shapes),
+                        compression="gzip"
+                    )
+
+                    g.attrs["num_encoder_tokens"] = int(enc_outputs_class.shape[1])
+                    g.attrs["num_classes"] = int(enc_outputs_class.shape[-1])
+                    g.attrs["num_queries"] = int(topk)
+
+
 
         topk_score = torch.gather(
             enc_outputs_class, 1,

@@ -1,4 +1,8 @@
-_base_ = 'mmdet::common/ssj_scp_270k_coco-instance.py'
+# _base_ = '/home/poonam_rajput/scratch/mmdetection/mmdet/configs/common/ssj_scp_270k_coco_instance.py'
+_base_ = [
+    '/home/poonam_rajput/scratch/mmdetection/configs/_base_/datasets/coco_detection.py', 
+    '/home/poonam_rajput/scratch/mmdetection/configs/_base_/default_runtime.py'
+]
 
 custom_imports = dict(
     imports=['projects.CO-DETR.codetr'], allow_failed_imports=False)
@@ -251,7 +255,7 @@ model = dict(
     test_cfg=[
         # Deferent from the DINO, we use the NMS.
         dict(
-            max_per_img=300,
+            max_per_img=900,
             # NMS can improve the mAP by 0.2.
             nms=dict(type='soft_nms', iou_threshold=0.8)),
         dict(
@@ -323,7 +327,7 @@ val_dataloader = dict(dataset=dict(pipeline=test_pipeline))
 test_dataloader = val_dataloader
 
 optim_wrapper = dict(
-    _delete_=True,
+    # _delete_=True,
     type='OptimWrapper',
     optimizer=dict(type='AdamW', lr=2e-4, weight_decay=0.0001),
     clip_grad=dict(max_norm=0.1, norm_type=2),
@@ -334,7 +338,7 @@ test_evaluator = val_evaluator
 
 max_epochs = 12
 train_cfg = dict(
-    _delete_=True,
+    # _delete_=True,
     type='EpochBasedTrainLoop',
     max_epochs=max_epochs,
     val_interval=1)
