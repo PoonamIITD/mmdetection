@@ -313,9 +313,13 @@ class GroundingDINO(DINO):
     ) -> Dict:
         encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
             img_feats, batch_data_samples)
+        
+        data_sample = batch_data_samples[0]
+        img_meta = data_sample.metainfo
+        image_name = os.path.basename(img_meta["img_path"])
 
         encoder_outputs_dict = self.forward_encoder(
-            **encoder_inputs_dict, text_dict=text_dict)
+            **encoder_inputs_dict, text_dict=text_dict, image_name=image_name)
 
         tmp_dec_in, head_inputs_dict = self.pre_decoder(
             **encoder_outputs_dict, batch_data_samples=batch_data_samples)
@@ -328,26 +332,52 @@ class GroundingDINO(DINO):
     def forward_encoder(self, feat: Tensor, feat_mask: Tensor,
                         feat_pos: Tensor, spatial_shapes: Tensor,
                         level_start_index: Tensor, valid_ratios: Tensor,
-                        text_dict: Dict) -> Dict:
+                        text_dict: Dict,
+                        image_name: str = None ) -> Dict:
+        
         text_token_mask = text_dict['text_token_mask']
-        memory, memory_text = self.encoder(
-            query=feat,
-            query_pos=feat_pos,
-            key_padding_mask=feat_mask,  # for self_attn
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            valid_ratios=valid_ratios,
-            # for text encoder
-            memory_text=text_dict['embedded'],
-            text_attention_mask=~text_token_mask,
-            position_ids=text_dict['position_ids'],
-            text_self_attention_masks=text_dict['masks'])
+        # --------------------------------------------------
+        # Case 1: Use pooled CODINO memory (inference only)
+        # --------------------------------------------------
+        pooled_h5_path = 'enc_all_embeds/codino_pooled_gdino_memory_fp16.h5'
+        if (not self.training) and image_name is not None:
+            with h5py.File(pooled_h5_path, "r") as f:
+                g = f["images"][image_name]
+
+                pooled_memory = torch.from_numpy(
+                                g["pooled_memory"][()]).to(
+                                device=feat.device,
+                                dtype=feat.dtype   # cast to model dtype (FP32)
+                            ).unsqueeze(0)
+
+            memory = pooled_memory
+            memory_text = text_dict["embedded"]
+
+        # --------------------------------------------------
+        # Case 2: Normal GDINO path
+        # --------------------------------------------------
+        else:
+            memory, memory_text = self.encoder(
+                query=feat,
+                query_pos=feat_pos,
+                key_padding_mask=feat_mask,
+                spatial_shapes=spatial_shapes,
+                level_start_index=level_start_index,
+                valid_ratios=valid_ratios,
+                memory_text=text_dict['embedded'],
+                text_attention_mask=~text_token_mask,
+                position_ids=text_dict['position_ids'],
+                text_self_attention_masks=text_dict['masks'],
+            )
+
         encoder_outputs_dict = dict(
             memory=memory,
             memory_mask=feat_mask,
             spatial_shapes=spatial_shapes,
             memory_text=memory_text,
-            text_token_mask=text_token_mask)
+            text_token_mask=text_token_mask,
+        )
+
         return encoder_outputs_dict
 
     def pre_decoder(
@@ -378,70 +408,106 @@ class GroundingDINO(DINO):
         # binary classification.
         topk_indices = torch.topk(
             enc_outputs_class.max(-1)[0], k=self.num_queries, dim=1)[1]
-        
-        def to_numpy(x):
-            return x.detach().cpu().numpy()
+        # def to_numpy(x):
+        #     return x.detach().cpu().numpy()
 
-        if (not self.training) and batch_data_samples is not None:
-            data_sample = batch_data_samples[0] 
-            img_meta = data_sample.metainfo 
-            image_name = ( img_meta.get("ori_filename", None) 
-                          or img_meta.get("file_name", None) or 
-                          img_meta.get("filename", None) ) 
-            if image_name is None and "img_path" in img_meta:
-                image_name = os.path.basename(img_meta["img_path"])
+        # if (not self.training) and batch_data_samples is not None:
+        #     data_sample = batch_data_samples[0] 
+        #     img_meta = data_sample.metainfo 
+        #     image_name = ( img_meta.get("ori_filename", None) 
+        #                   or img_meta.get("file_name", None) or 
+        #                   img_meta.get("filename", None) ) 
+        #     if image_name is None and "img_path" in img_meta:
+        #         image_name = os.path.basename(img_meta["img_path"])
 
-            if image_name is not None:
-                root_dir = os.getcwd()
-                dump_dir = os.path.join(root_dir, "enc_all_props")
-                os.makedirs(dump_dir, exist_ok=True)
+        #     if image_name is not None:
+        #         root_dir = os.getcwd()
+        #         dump_dir = os.path.join(root_dir, "enc_all_props")
+        #         os.makedirs(dump_dir, exist_ok=True)
 
-                h5_path = os.path.join(dump_dir, "enc_all_props_gdino.h5")
-                lock_path = h5_path + ".lock"
+        #         h5_path = os.path.join(dump_dir, "enc_all_props_gdino.h5")
+        #         lock_path = h5_path + ".lock"
 
-                with FileLock(lock_path):
-                    with h5py.File(h5_path, "a") as f:
-                        root = f.require_group("images")
+        #         with FileLock(lock_path):
+        #             with h5py.File(h5_path, "a") as f:
+        #                 root = f.require_group("images")
 
-                        if image_name not in root:
-                            g = root.create_group(image_name)
+        #                 if image_name not in root:
+        #                     g = root.create_group(image_name)
 
-                            g.create_dataset(
-                                "enc_outputs_class",
-                                data=to_numpy(enc_outputs_class[0]),
-                                compression="gzip",
-                                compression_opts=4
-                            )
+        #                     g.create_dataset(
+        #                         "enc_outputs_class",
+        #                         data=to_numpy(enc_outputs_class[0]),
+        #                         compression="gzip",
+        #                         compression_opts=4
+        #                     )
 
-                            g.create_dataset(
-                                "enc_outputs_coord_unact",
-                                data=to_numpy(enc_outputs_coord_unact[0]),
-                                compression="gzip",
-                                compression_opts=4
-                            )
+        #                     g.create_dataset(
+        #                         "enc_outputs_coord_unact",
+        #                         data=to_numpy(enc_outputs_coord_unact[0]),
+        #                         compression="gzip",
+        #                         compression_opts=4
+        #                     )
 
-                            g.create_dataset(
-                                "topk_indices",
-                                data=to_numpy(topk_indices[0]),
-                                compression="gzip"
-                            )
+        #                     g.create_dataset(
+        #                         "topk_indices",
+        #                         data=to_numpy(topk_indices[0]),
+        #                         compression="gzip"
+        #                     )
 
-                            g.create_dataset(
-                                "spatial_shapes",
-                                data=to_numpy(spatial_shapes),
-                                compression="gzip"
-                            )
+        #                     g.create_dataset(
+        #                         "spatial_shapes",
+        #                         data=to_numpy(spatial_shapes),
+        #                         compression="gzip"
+        #                     )
 
-                            g.attrs["num_encoder_tokens"] = int(enc_outputs_class.shape[1])
-                            g.attrs["num_classes"] = int(enc_outputs_class.shape[-1])
-                            g.attrs["num_queries"] = int(self.num_queries)
-
+        #                     g.attrs["num_encoder_tokens"] = int(enc_outputs_class.shape[1])
+        #                     g.attrs["num_classes"] = int(enc_outputs_class.shape[-1])
+        #                     g.attrs["num_queries"] = int(self.num_queries)
         topk_score = torch.gather(
             enc_outputs_class, 1,
             topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
         topk_coords_unact = torch.gather(
             enc_outputs_coord_unact, 1,
             topk_indices.unsqueeze(-1).repeat(1, 1, 4))
+        
+        # # ------------------------------------------------------------
+        # # 🔥 OVERRIDE WITH CODINO TOP-K (inference only)
+        # # ------------------------------------------------------------
+        # if (not self.training) and batch_data_samples is not None:
+        #     import os, h5py
+
+        #     data_sample = batch_data_samples[0]
+        #     img_meta = data_sample.metainfo
+        #     image_name = os.path.basename(img_meta["img_path"])
+
+        #     if image_name is not None:
+        #         h5_path = os.path.join(
+        #             os.getcwd(), "enc_all_props", "codino", "enc_all_props_codino.h5"
+        #         )
+
+        #         if os.path.exists(h5_path):
+        #             with h5py.File(h5_path, "r") as f:
+        #                 if image_name in f["images"]:
+        #                     g = f["images"][image_name]
+
+        #                     # IMPORTANT: match GDINO device & dtype
+        #                     device = memory.device
+        #                     dtype = memory.dtype
+
+        #                     codino_boxes = torch.from_numpy(
+        #                         g["enc_outputs_coord_unact"][()]
+        #                     ).to(device=device, dtype=dtype)  # [N, 4]
+
+        #                     codino_topk = torch.from_numpy(
+        #                         g["topk_indices"][()]
+        #                     ).to(device=device)  # [num_queries]
+
+        #                     # Directly use CODINO top-K boxes
+        #                     topk_coords_unact = codino_boxes[codino_topk]
+        #                     topk_coords_unact = topk_coords_unact.unsqueeze(0)
+
+        
         topk_coords = topk_coords_unact.sigmoid()
         topk_coords_unact = topk_coords_unact.detach()
 

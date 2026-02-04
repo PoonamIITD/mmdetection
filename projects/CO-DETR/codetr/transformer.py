@@ -1180,12 +1180,102 @@ class CoDinoTransformer(CoDeformableDetrTransformer):
             output_memory)
         enc_outputs_coord_unact = reg_branches[self.decoder.num_layers](
             output_memory) + output_proposals
+        
+        # GDINO_SPATIAL_SHAPES = [(188, 334),(94, 167),(47, 84),(24, 42),(12, 21)]
+        # # ------------------------------------------------------------
+        # # 🔥 Weighted spatial pooling: CODINO → GDINO resolution
+        # # ------------------------------------------------------------
+        # if (not self.training) and img_metas is not None:
+
+        #     # memory: [bs, N, C]
+        #     # enc_outputs_class: [bs, N, num_classes]
+        #     bs, N, C = memory.shape
+        #     device = memory.device
+        #     dtype = memory.dtype
+
+        #     # 1️⃣ Class confidence (objectness-style)
+        #     # [bs, N]
+        #     class_conf = enc_outputs_class.sigmoid().max(dim=-1)[0]
+
+        #     pooled_memory_levels = []
+        #     start = 0
+
+        #     for lvl, ((H, W), (h, w)) in enumerate(
+        #         zip(spatial_shapes.tolist(), GDINO_SPATIAL_SHAPES)
+        #     ):
+        #         num_tokens = H * W
+
+        #         # 2️⃣ Slice level
+        #         mem_lvl = memory[:, start:start + num_tokens, :]          # [bs, HW, C]
+        #         conf_lvl = class_conf[:, start:start + num_tokens]        # [bs, HW]
+        #         start += num_tokens
+
+        #         # 3️⃣ Reshape to spatial
+        #         mem_lvl = mem_lvl.transpose(1, 2).reshape(bs, C, H, W)
+        #         conf_lvl = conf_lvl.reshape(bs, 1, H, W)
+
+        #         # 4️⃣ Confidence-weighted features
+        #         weighted_mem = mem_lvl * conf_lvl
+
+        #         # 5️⃣ Adaptive pooling to GDINO shape
+        #         pooled_feat = torch.nn.functional.adaptive_avg_pool2d(
+        #             weighted_mem, (h, w)
+        #         )
+        #         pooled_weight = torch.nn.functional.adaptive_avg_pool2d(
+        #             conf_lvl, (h, w)
+        #         )
+
+        #         # Normalize (avoid division by zero)
+        #         pooled_feat = pooled_feat / (pooled_weight + 1e-6)
+
+        #         # 6️⃣ Flatten back to tokens
+        #         pooled_feat = pooled_feat.flatten(2).transpose(1, 2)  # [bs, h*w, C]
+        #         pooled_memory_levels.append(pooled_feat)
+
+        #     # 7️⃣ Final pooled memory (GDINO-compatible)
+        #     pooled_memory = torch.cat(pooled_memory_levels, dim=1)  # [bs, ~83698, C]
+
+        #     image_name = os.path.basename(img_metas[0]["img_path"])
+
+        #     save_dir = "../../enc_all_embeds"
+        #     os.makedirs(save_dir, exist_ok=True)
+
+        #     h5_path = os.path.join(save_dir, "codino_pooled_gdino_memory_fp16.h5")
+        #     lock_path = h5_path + ".lock"
+
+        #     def to_numpy_fp16(x):
+        #         return x.detach().cpu().to(torch.float16).numpy()
+
+        #     with FileLock(lock_path):
+        #         with h5py.File(h5_path, "a") as f:
+        #             root = f.require_group("images")
+
+        #             # Avoid double write
+        #             if image_name not in root:
+        #                 g = root.create_group(image_name)
+
+        #             # 🔹 Pooled embeddings
+        #             g.create_dataset(
+        #                 "pooled_memory",
+        #                 data=to_numpy_fp16(pooled_memory[0]),  # [N_gdino, C]
+        #                 compression="gzip",
+        #                 compression_opts=4
+        #             )
+
+        #             # 🔹 Metadata
+        #             g.attrs["dtype"] = "float16"
+        #             g.attrs["num_tokens"] = pooled_memory.shape[1]
+        #             g.attrs["embed_dim"] = pooled_memory.shape[2]
+        #             g.attrs["source"] = "CODINO_weighted_pooling"
+                
+        # # ------------------------------------------------------------
+
+
         cls_out_features = cls_branches[self.decoder.num_layers].out_features
         topk = self.two_stage_num_proposals
         # NOTE In DeformDETR, enc_outputs_class[..., 0] is used for topk
         topk_indices = torch.topk(enc_outputs_class.max(-1)[0], topk, dim=1)[1]
-
-        # =========================================================
+# =========================================================
         # DEBUG: dump ALL encoder proposals (TEST ONLY)
         # =========================================================
         # if (not self.training) and img_metas is not None:
@@ -1277,14 +1367,46 @@ class CoDinoTransformer(CoDeformableDetrTransformer):
                     g.attrs["num_classes"] = int(enc_outputs_class.shape[-1])
                     g.attrs["num_queries"] = int(topk)
 
-
-
         topk_score = torch.gather(
             enc_outputs_class, 1,
             topk_indices.unsqueeze(-1).repeat(1, 1, cls_out_features))
         topk_coords_unact = torch.gather(
             enc_outputs_coord_unact, 1,
             topk_indices.unsqueeze(-1).repeat(1, 1, 4))
+         # ------------------------------------------------------------
+        # 🔥 OVERRIDE WITH CODINO TOP-K (inference only)
+        # ------------------------------------------------------------
+        # if (not self.training) and img_metas is not None:
+        #     import os, h5py
+
+        #     image_name = os.path.basename(img_metas[0]["img_path"])
+
+        #     if image_name is not None:
+        #         h5_path = os.path.join(
+        #             os.getcwd(), "enc_all_props", "gdino", "enc_all_props_gdino.h5"
+        #         )
+
+        #         if os.path.exists(h5_path):
+        #             with h5py.File(h5_path, "r") as f:
+        #                 if image_name in f["images"]:
+        #                     g = f["images"][image_name]
+
+        #                     # IMPORTANT: match GDINO device & dtype
+        #                     device = memory.device
+        #                     dtype = memory.dtype
+
+        #                     gdino_boxes = torch.from_numpy(
+        #                         g["enc_outputs_coord_unact"][()]
+        #                     ).to(device=device, dtype=dtype)  # [N, 4]
+
+        #                     gdino_topk = torch.from_numpy(
+        #                         g["topk_indices"][()]
+        #                     ).to(device=device)  # [num_queries]
+
+        #                     # Directly use CODINO top-K boxes
+        #                     topk_coords_unact = gdino_boxes[gdino_topk]
+        #                     topk_coords_unact = topk_coords_unact.unsqueeze(0)
+
         topk_anchor = topk_coords_unact.sigmoid()
         topk_coords_unact = topk_coords_unact.detach()
 
