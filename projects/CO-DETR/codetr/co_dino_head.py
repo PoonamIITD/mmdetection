@@ -20,6 +20,8 @@ from mmdet.structures.bbox import (bbox_cxcywh_to_xyxy, bbox_overlaps,
                                    bbox_xyxy_to_cxcywh)
 from mmdet.utils import InstanceList, reduce_mean
 
+import h5py
+import os 
 
 @MODELS.register_module()
 class CoDINOHead(DINOHead):
@@ -56,6 +58,18 @@ class CoDINOHead(DINOHead):
         self.transformer = transformer
         self.act_cfg = transformer.get('act_cfg',
                                        dict(type='ReLU', inplace=True))
+
+        ########################################################################
+        self.save_decoder_props = True
+        # root_dir = os.getcwd()
+        # dump_dir = os.path.join(root_dir, "enc_all_props")
+        self.h5_path = "decoder_outputs_codino.h5"
+
+        if self.save_decoder_props and not hasattr(self, "h5_file"):
+            self.h5_file = h5py.File(self.h5_path, "a")
+            if "images" not in self.h5_file:
+                self.h5_file.create_group("images")
+        #########################################################################
 
         super().__init__(*args, **kwargs)
 
@@ -140,7 +154,8 @@ class CoDINOHead(DINOHead):
                 dn_bbox_query,
                 attn_mask,
                 reg_branches=self.reg_branches if self.with_box_refine else None,  # noqa:E501
-                cls_branches=self.cls_branches if self.as_two_stage else None  # noqa:E501
+                cls_branches=self.cls_branches if self.as_two_stage else None,  # noqa:E501
+                img_metas=img_metas
             )
         outs = []
         num_level = len(mlvl_feats)
@@ -255,9 +270,40 @@ class CoDINOHead(DINOHead):
         with_nms = self.test_cfg.get('nms', None)
 
         img_shape = img_meta['img_shape']
+        #########################################################################
+        img_path = img_meta["img_path"]
+        img_name = os.path.basename(img_path)
+        #########################################################################
+
         # exclude background
         if self.loss_cls.use_sigmoid:
             cls_score = cls_score.sigmoid()
+            # -----------------------------
+            # SAVE ALL 900 QUERIES
+            #-----------------------------
+            if self.save_decoder_props:
+
+                grp_root = self.h5_file["images"]
+
+                if img_name not in grp_root:
+                    grp = grp_root.create_group(img_name)
+
+                    grp.create_dataset(
+                        "cls_scores",
+                        data=cls_score.detach().cpu().numpy()
+                    )
+
+                    grp.create_dataset(
+                        "bbox_preds",
+                        data=bbox_pred.detach().cpu().numpy()
+                    )
+
+                    grp.attrs["img_shape"] = img_meta["img_shape"]
+                    grp.attrs["ori_shape"] = img_meta["ori_shape"]
+                    grp.attrs["scale_factor"] = img_meta["scale_factor"]
+                    grp.attrs["img_path"] = img_meta["img_path"]
+            #########################################################################
+
             scores, indexes = cls_score.view(-1).topk(max_per_img)
             det_labels = indexes % self.num_classes
             bbox_index = indexes // self.num_classes

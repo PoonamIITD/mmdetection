@@ -12,6 +12,8 @@ from .detr_layers import (DetrTransformerDecoder, DetrTransformerDecoderLayer,
                           DetrTransformerEncoder, DetrTransformerEncoderLayer)
 from .utils import inverse_sigmoid
 
+import math
+
 try:
     from fairscale.nn.checkpoint import checkpoint_wrapper
 except Exception:
@@ -248,7 +250,30 @@ class DeformableDetrTransformerEncoderLayer(DetrTransformerEncoderLayer):
         ]
         self.norms = ModuleList(norms_list)
 
+class LoRALinear(nn.Module):
+    def __init__(self, linear_layer, r=16, alpha=32):
+        super().__init__()
 
+        self.linear = linear_layer
+        self.linear.weight.requires_grad = False
+        if self.linear.bias is not None:
+            self.linear.bias.requires_grad = False
+
+        in_dim = linear_layer.in_features
+        out_dim = linear_layer.out_features
+
+        self.lora_A = nn.Linear(in_dim, r, bias=False)
+        self.lora_B = nn.Linear(r, out_dim, bias=False)
+
+        self.scaling = alpha / r
+
+        # important initialization
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
+
+    def forward(self, x):
+        return self.linear(x) + self.scaling * self.lora_B(self.lora_A(x))
+ 
 class DeformableDetrTransformerDecoderLayer(DetrTransformerDecoderLayer):
     """Decoder layer of Deformable DETR."""
 
@@ -256,6 +281,19 @@ class DeformableDetrTransformerDecoderLayer(DetrTransformerDecoderLayer):
         """Initialize self_attn, cross-attn, ffn, and norms."""
         self.self_attn = MultiheadAttention(**self.self_attn_cfg)
         self.cross_attn = MultiScaleDeformableAttention(**self.cross_attn_cfg)
+
+        # Inject LoRA into cross attention
+        # self.cross_attn.value_proj = LoRALinear(
+        #     self.cross_attn.value_proj,
+        #     r=16,
+        #     alpha=32
+        # )
+
+        # self.cross_attn.output_proj = LoRALinear(
+        #     self.cross_attn.output_proj,
+        #     r=16,
+        #     alpha=32
+        # )
         self.embed_dims = self.self_attn.embed_dims
         self.ffn = FFN(**self.ffn_cfg)
         norms_list = [

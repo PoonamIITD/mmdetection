@@ -27,6 +27,7 @@ from .glip import GLIP
 from .grid_rcnn import GridRCNN
 from .grounding_dino import GroundingDINO
 from .htc import HybridTaskCascade
+from .hybrid_dino import HybridDINO
 from .kd_one_stage import KnowledgeDistillationSingleStageDetector
 from .lad import LAD
 from .mask2former import Mask2Former
@@ -71,5 +72,5 @@ __all__ = [
     'MaskFormer', 'DDOD', 'Mask2Former', 'SemiBaseDetector', 'SoftTeacher',
     'RTMDet', 'Detectron2Wrapper', 'CrowdDet', 'CondInst', 'BoxInst',
     'DetectionTransformer', 'ConditionalDETR', 'DINO', 'DABDETR', 'GLIP',
-    'DDQDETR', 'GroundingDINO'
+    'DDQDETR', 'GroundingDINO', 'HybridDINO'
 ]

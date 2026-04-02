@@ -23,6 +23,9 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                                   self.embed_dims, 2)
         self.norm = nn.LayerNorm(self.embed_dims)
 
+        self.all_sampling_locations = []
+        self.all_attention_weights = []
+
     def forward(self, query: Tensor, value: Tensor, key_padding_mask: Tensor,
                 self_attn_mask: Tensor, reference_points: Tensor,
                 spatial_shapes: Tensor, level_start_index: Tensor,
@@ -69,6 +72,7 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
               coordinates are arranged as (cx, cy, w, h)
         """
         intermediate = []
+        save_flag = True
         intermediate_reference_points = [reference_points]
         for lid, layer in enumerate(self.layers):
             if reference_points.shape[-1] == 4:
@@ -84,7 +88,9 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 reference_points_input[:, :, 0, :])
             query_pos = self.ref_point_head(query_sine_embed)
 
-            query = layer(
+            #if lid == len(self.layers) - 1:
+                #save_flag = True
+            query, sampling_locations, attention_weights = layer(
                 query,
                 query_pos=query_pos,
                 value=value,
@@ -94,7 +100,14 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 level_start_index=level_start_index,
                 valid_ratios=valid_ratios,
                 reference_points=reference_points_input,
+                save_flag=save_flag,
                 **kwargs)
+            if save_flag:
+                self.all_sampling_locations.append(sampling_locations.detach())
+                self.all_attention_weights.append(attention_weights.detach())
+            #if lid == len(self.layers) - 1:
+                #self.last_sampling_locations = layer.cross_attn.sampling_locations_params
+                #self.last_attention_weights = layer.cross_attn.attention_weights_params
 
             if reg_branches is not None:
                 tmp = reg_branches[lid](query)

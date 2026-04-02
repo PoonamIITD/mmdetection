@@ -8,6 +8,7 @@ from .dynamic_soft_label_assigner import DynamicSoftLabelAssigner
 from .grid_assigner import GridAssigner
 from .hungarian_assigner import HungarianAssigner
 from .iou2d_calculator import BboxOverlaps2D, BboxOverlaps2D_GLIP
+from .min_cost_flow_assigner import MinCostFlowAssigner
 from .match_cost import (BBoxL1Cost, BinaryFocalLossCost, ClassificationCost,
                          CrossEntropyLossCost, DiceCost, FocalLossCost,
                          IoUCost)
@@ -28,5 +29,5 @@ __all__ = [
     'TaskAlignedAssigner', 'TopkHungarianAssigner', 'BBoxL1Cost',
     'ClassificationCost', 'CrossEntropyLossCost', 'DiceCost', 'FocalLossCost',
     'IoUCost', 'BboxOverlaps2D', 'DynamicSoftLabelAssigner',
-    'MultiInstanceAssigner', 'BboxOverlaps2D_GLIP'
+    'MultiInstanceAssigner', 'BboxOverlaps2D_GLIP', 'MinCostFlowAssigner'
 ]

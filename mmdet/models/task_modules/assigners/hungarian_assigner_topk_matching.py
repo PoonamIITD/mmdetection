@@ -35,7 +35,9 @@ class HungarianAssigner(BaseAssigner):
 
     def __init__(
         self, match_costs: Union[List[Union[dict, ConfigDict]], dict,
-                                 ConfigDict]
+                                 ConfigDict], 
+                                 topk=2,iou_thr=0.5, small_obj_thr=32**2,
+                                 visibility_thr = 0.7, enable_topk=True
     ) -> None:
         if isinstance(match_costs, dict):
             match_costs = [match_costs]
@@ -46,6 +48,11 @@ class HungarianAssigner(BaseAssigner):
         self.match_costs = [
             TASK_UTILS.build(match_cost) for match_cost in match_costs
         ]
+        self.topk = topk
+        self.iou_thr = iou_thr
+        self.small_obj_thr = small_obj_thr
+        self.enable_topk = enable_topk
+        self.visibility_thr = visibility_thr
 
     def assign(self,
                pred_instances: InstanceData,
@@ -121,13 +128,14 @@ class HungarianAssigner(BaseAssigner):
             cost_list.append(cost)
         cost = torch.stack(cost_list).sum(dim=0)
 
+        cost_device = cost.detach()  # for GPU ops
         # 3. do Hungarian matching on CPU using linear_sum_assignment
-        cost = cost.detach().cpu()
+        cost_cpu = cost.detach().cpu()
         if linear_sum_assignment is None:
             raise ImportError('Please run "pip install scipy" '
                               'to install scipy first.')
 
-        matched_row_inds, matched_col_inds = linear_sum_assignment(cost)
+        matched_row_inds, matched_col_inds = linear_sum_assignment(cost_cpu)
         matched_row_inds = torch.from_numpy(matched_row_inds).to(device)
         matched_col_inds = torch.from_numpy(matched_col_inds).to(device)
 
@@ -137,6 +145,101 @@ class HungarianAssigner(BaseAssigner):
         # assign foregrounds based on matching results
         assigned_gt_inds[matched_row_inds] = matched_col_inds + 1
         assigned_labels[matched_row_inds] = gt_labels[matched_col_inds]
+
+        # ============================
+        # 🔥 Top-k augmentation block
+        # ============================
+        if (self.enable_topk and
+            hasattr(gt_instances, 'visibility') and
+            hasattr(pred_instances, 'bboxes')):
+
+            vis = gt_instances.visibility.to(device)  # (num_gts,)
+            gt_bboxes = gt_instances.bboxes
+            pred_bboxes = pred_instances.bboxes
+
+            # compute area (xyxy format)
+            areas = (gt_bboxes[:, 2] - gt_bboxes[:, 0]) * \
+                    (gt_bboxes[:, 3] - gt_bboxes[:, 1])
+
+            # 🎯 target GTs: small OR occluded
+            small_mask = areas < self.small_obj_thr
+            occluded_mask = vis < self.visibility_thr
+            target_mask = small_mask | occluded_mask
+
+            target_gt_inds = torch.nonzero(target_mask).squeeze(1)
+
+            if len(target_gt_inds) > 0:
+                from mmdet.structures.bbox import bbox_overlaps
+
+                # IoU matrix (num_preds, num_gts)
+                ious = bbox_overlaps(pred_bboxes, gt_bboxes)
+
+                for gt_idx in target_gt_inds:
+
+                    gt_cost = cost_device[:, gt_idx].clone()
+
+                    already_matched = (assigned_gt_inds == (gt_idx + 1))
+                    gt_cost[already_matched] = float('inf')
+
+                    valid_mask = (ious[:, gt_idx] > self.iou_thr) & (~already_matched)
+                    valid_inds = torch.nonzero(valid_mask).squeeze(1)
+
+                    if len(valid_inds) == 0:
+                        continue
+
+                    valid_ious = ious[valid_inds, gt_idx]
+
+                    # 🔥 best version (less noisy)
+                    topk_iou_vals = valid_ious.topk(min(3, len(valid_ious))).values
+                    score = topk_iou_vals.mean() * (1 - vis[gt_idx])
+
+                    k = int(self.topk * (1 + 2 * score))
+                    k = min(k, self.topk * 3)  # optional safety
+                    k = max(1, min(k, len(valid_inds)))
+
+                    valid_cost = gt_cost[valid_inds]
+                    topk_local = torch.topk(valid_cost, k=k, largest=False).indices
+                    topk_inds = valid_inds[topk_local]
+
+                    for pred_idx in topk_inds:
+                        if assigned_gt_inds[pred_idx] == 0:
+                            assigned_gt_inds[pred_idx] = gt_idx + 1
+                            assigned_labels[pred_idx] = gt_labels[gt_idx]
+
+            # Count matches per GT (ignore background 0)
+            gt_match_count = torch.bincount(
+                assigned_gt_inds.clamp(min=0),
+                minlength=num_gts + 1
+            )[1:]  # remove background
+
+            # Extra positives beyond Hungarian (which gives 1)
+            extra_pos = gt_match_count - 1
+
+            # ===== Overall stats =====
+            pos_mask = extra_pos > 0
+            num_extra = pos_mask.sum().item()
+            avg_extra = extra_pos[pos_mask].float().mean().item() if num_extra > 0 else 0.0
+
+            print(f"[TopK] GTs with extra matches: {num_extra}/{num_gts}")
+            print(f"[TopK] Avg extra per GT: {avg_extra:.2f}")
+
+            # ===== Target (small/occluded) stats =====
+            target_gt_inds = torch.nonzero(target_mask, as_tuple=False).flatten()
+
+            if len(target_gt_inds) > 0:
+                target_extra = extra_pos[target_gt_inds]
+
+                target_mask_pos = target_extra > 0
+                num_target_extra = target_mask_pos.sum().item()
+                avg_target_extra = (
+                    target_extra[target_mask_pos].float().mean().item()
+                    if num_target_extra > 0 else 0.0
+                )
+
+                print(f"[TopK] Target GTs: {len(target_gt_inds)}")
+                print(f"[TopK] Target GTs with extra: {num_target_extra}")
+                print(f"[TopK] Avg extra (target): {avg_target_extra:.2f}")
+        
         return AssignResult(
             num_gts=num_gts,
             gt_inds=assigned_gt_inds,

@@ -1,5 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -347,7 +347,8 @@ class DETRHead(BaseModule):
     def get_targets(self, cls_scores_list: List[Tensor],
                     bbox_preds_list: List[Tensor],
                     batch_gt_instances: InstanceList,
-                    batch_img_metas: List[dict]) -> tuple:
+                    batch_img_metas: List[dict],
+                    save_flag: bool=False) -> tuple:
         """Compute regression and classification targets for a batch image.
 
         Outputs from a single decoder layer of a single feature level are used.
@@ -382,6 +383,10 @@ class DETRHead(BaseModule):
                                       batch_gt_instances, batch_img_metas)
         num_total_pos = sum((inds.numel() for inds in pos_inds_list))
         num_total_neg = sum((inds.numel() for inds in neg_inds_list))
+        if save_flag:
+            return (labels_list, label_weights_list, bbox_targets_list,
+                bbox_weights_list, num_total_pos, num_total_neg, 
+                pos_inds_list, neg_inds_list)
         return (labels_list, label_weights_list, bbox_targets_list,
                 bbox_weights_list, num_total_pos, num_total_neg)
 

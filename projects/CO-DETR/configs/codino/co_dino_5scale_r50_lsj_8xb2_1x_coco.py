@@ -1,4 +1,8 @@
-_base_ = 'mmdet::common/ssj_scp_270k_coco-instance.py'
+# _base_ = 'mmdet::common/ssj_scp_270k_coco-instance.py'
+_base_ = [
+    '/home/poonam_rajput/scratch/mmdetection/configs/_base_/datasets/coco_detection.py', 
+    '/home/poonam_rajput/scratch/mmdetection/configs/_base_/default_runtime.py'
+]
 
 custom_imports = dict(
     imports=['projects.CO-DETR.codetr'], allow_failed_imports=False)
@@ -251,7 +255,7 @@ model = dict(
     test_cfg=[
         # Deferent from the DINO, we use the NMS.
         dict(
-            max_per_img=300,
+            max_per_img=900,
             # NMS can improve the mAP by 0.2.
             nms=dict(type='soft_nms', iou_threshold=0.8)),
         dict(
