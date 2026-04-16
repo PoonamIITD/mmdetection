@@ -214,10 +214,8 @@ class GroundingDINOHead(DINOHead):
                                       hidden_state,
                                       descriptor_embedded,
                                       descriptor_mask,
-                                      memory_text,
-                                      text_token_mask,
-                                      descriptor_ranges_per_class,
-                                      token_positive_maps):
+                                      class_embeds,
+                                      descriptor_ranges_per_class):
         """
         hidden_state: [bs, Q, C]
         descriptor_embedded: [bs, total_tokens, C]
@@ -232,26 +230,7 @@ class GroundingDINOHead(DINOHead):
         # ---- normalize (VERY important) ----
         hidden_state = torch.nn.functional.normalize(hidden_state, dim=-1)
         descriptor_embedded = torch.nn.functional.normalize(descriptor_embedded, dim=-1)
-        memory_text = torch.nn.functional.normalize(memory_text, dim=-1)
-        pos_map = token_positive_maps[0]
-
-        class_embeds = []
-
-        for cls_id in sorted(pos_map.keys()):
-            token_ids = torch.tensor(pos_map[cls_id], device=memory_text.device)
-
-            tokens = memory_text[:, token_ids, :]         # [bs, t_k, C]
-            mask   = text_token_mask[:, token_ids]        # [bs, t_k]
-
-            mask = mask.unsqueeze(-1)
-
-            summed = (tokens * mask).sum(dim=1)           # [bs, C]
-            count  = mask.sum(dim=1).clamp(min=1)
-
-            class_embed = summed / count                  # [bs, C]
-            class_embeds.append(class_embed)
-
-        class_embeds = torch.stack(class_embeds, dim=1)   # [bs, K, C]
+        class_embeds = torch.nn.functional.normalize(class_embeds, dim=-1)
 
         all_scores = []
 
@@ -280,7 +259,7 @@ class GroundingDINOHead(DINOHead):
             desc_embeds = torch.stack(desc_embeds_per_descriptor, dim=1) # [bs, 4, C]
 
             # ---- compute v_j^(k) ----
-            y_global = class_embeds[:, k:k+1, :] 
+            y_global = class_embeds[k].view(1,1,C).expand(bs,1,C)
 
             sim_text = torch.matmul(y_global, desc_embeds.transpose(1,2)).squeeze(1) # [bs, 4]
             # THIS IS EXACTLY v_j^(k)
@@ -307,8 +286,8 @@ class GroundingDINOHead(DINOHead):
         text_token_mask: Tensor,
         descriptor_embedded=None,
         descriptor_mask=None,
+        class_embeds=None,
         descriptor_ranges_per_class=None,
-        token_poitive_maps= None
     ) -> Tuple[Tensor]:
         """Forward function.
 
@@ -359,10 +338,8 @@ class GroundingDINOHead(DINOHead):
                     hidden_state,
                     descriptor_embedded,
                     descriptor_mask,
-                    memory_text,
-                    text_token_mask,
-                    descriptor_ranges_per_class,
-                    token_poitive_maps
+                    class_embeds,
+                    descriptor_ranges_per_class
                 )  # [bs,Q,K]
 
                 # normalize (important for stability)
@@ -439,7 +416,7 @@ class GroundingDINOHead(DINOHead):
         ]
 
         outs = self(hidden_states, references, memory_text, text_token_mask, 
-                    descriptor_embedded, descriptor_mask, descriptor_ranges_per_class, batch_token_positive_maps)
+                    descriptor_embedded, descriptor_mask, class_embeds, descriptor_ranges_per_class)
 
         predictions = self.predict_by_feat(
             *outs,

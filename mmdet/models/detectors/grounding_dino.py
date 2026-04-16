@@ -19,6 +19,88 @@ from .dino import DINO
 from .glip import (create_positive_map, create_positive_map_label_to_token,
                    run_ner)
 
+CLASS_DESCRIPTOR_PROMPTS = {
+    "person": [
+        "A full body view of a person",
+        "A person with head partially occluded",
+        "A person showing only upper body silhouette between objects",
+        "A person with only legs or torso visible due to obstruction",
+    ],
+    "rickshaw": [
+        "A rickshaw fully visible on the road",
+        "A rickshaw with rear passenger seat partially blocked",
+        "A rickshaw with curved back canopy visible and front occluded",
+        "A rickshaw with decorated rear structure partially hidden in traffic",
+    ],
+    "rickshaw van": [
+        "A rickshaw van fully visible carrying cargo",
+        "A rickshaw van with cargo area partially occluded",
+        "A rickshaw van with open rear platform visible but driver section hidden",
+        "A rickshaw van with metal frame partially blocked",
+    ],
+    "auto rickshaw": [
+        "A clear front or side view of an auto rickshaw",
+        "An auto rickshaw with canopy partially visible",
+        "An auto rickshaw with front windshield visible and sides occluded",
+        "An auto rickshaw with partial rear or side visibility",
+    ],
+    "truck": [
+        "A large truck clearly visible from the side",
+        "A truck with cargo container partially occluded",
+        "A truck with visible wheels or container edges but hidden cabin",
+        "A truck with large rectangular body partially visible",
+    ],
+    "pickup truck": [
+        "A clear side view of a pickup truck",
+        "A pickup truck with open rear bed partially occluded",
+        "A pickup truck with front cabin visible and cargo hidden",
+        "A pickup truck partially visible behind other vehicles",
+    ],
+    "private car": [
+        "A clear front or side view of a private car",
+        "A private car with roof or windshield visible but body occluded",
+        "A private car with front or rear blocked by traffic",
+        "A private car with only lights or mirrors visible",
+    ],
+    "motorcycle": [
+        "A motorcycle clearly visible with rider",
+        "A motorcycle with rider partially visible and occluded",
+        "A motorcycle with handlebar and front wheel visible",
+        "A motorcycle with rider silhouette partially hidden",
+    ],
+    "bicycle": [
+        "A clear view of a bicycle from the side",
+        "A bicycle with only wheels or frame partially visible",
+        "A bicycle with thin frame seen through gaps",
+        "A bicycle with only front or rear wheel visible",
+    ],
+    "bus": [
+        "A large bus clearly visible from the side",
+        "A bus with windows or side panels partially occluded",
+        "A bus with only upper portion visible",
+        "A bus with front or side blocked",
+    ],
+    "micro bus": [
+        "A micro bus fully visible on the road",
+        "A micro bus with windows partially visible",
+        "A micro bus with roof and side windows visible but lower part hidden",
+        "A micro bus partially blocked in dense traffic",
+    ],
+    "covered van": [
+        "A covered van clearly visible from the side",
+        "A covered van with enclosed rear partially visible",
+        "A covered van with rectangular cargo body partially visible",
+        "A covered van hidden behind other objects",
+    ],
+    "human hauler": [
+        "A human Hauler that is a small passenger carrier clearly visible with open sides",
+        "A human hauler with open side seating partially visible",
+        "A human hauler with metal frame and canopy occluded",
+        "A human hauler partially blocked with covered roof and open sides",
+    ],
+}
+
+
 
 def clean_label_name(name: str) -> str:
     name = re.sub(r'\(.*\)', '', name)
@@ -62,6 +144,11 @@ class GroundingDINO(DINO):
         self._special_tokens = '. '
         self.use_autocast = use_autocast
         super().__init__(*args, **kwargs)
+        self.Ks = [300, 200, 100, 50, 30, 20, 10]
+
+        self.total_matches_cls = {K: 0 for K in self.Ks}
+        self.total_matches_desc = {K: 0 for K in self.Ks}
+        self.total_samples = 0
 
     def _init_layers(self) -> None:
         """Initialize layers except for backbone, neck and bbox_head."""
@@ -309,7 +396,7 @@ class GroundingDINO(DINO):
         encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
             img_feats, batch_data_samples)
 
-        encoder_outputs_dict = self.forward_encoder(
+        encoder_outputs_dict, desc_encoder_outputs_dict = self.forward_encoder(
             **encoder_inputs_dict, text_dict=text_dict)
 
         tmp_dec_in, head_inputs_dict = self.pre_decoder(
@@ -318,13 +405,15 @@ class GroundingDINO(DINO):
 
         decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
         head_inputs_dict.update(decoder_outputs_dict)
-        return head_inputs_dict
+        return head_inputs_dict, desc_encoder_outputs_dict
 
     def forward_encoder(self, feat: Tensor, feat_mask: Tensor,
                         feat_pos: Tensor, spatial_shapes: Tensor,
                         level_start_index: Tensor, valid_ratios: Tensor,
                         text_dict: Dict) -> Dict:
-        text_token_mask = text_dict['text_token_mask']
+        aug_text_token_mask = text_dict['text_token_mask']
+        #Hardcoded
+        T = 39
         memory, memory_text = self.encoder(
             query=feat,
             query_pos=feat_pos,
@@ -334,17 +423,31 @@ class GroundingDINO(DINO):
             valid_ratios=valid_ratios,
             # for text encoder
             memory_text=text_dict['embedded'],
-            text_attention_mask=~text_token_mask,
+            text_attention_mask=~aug_text_token_mask,
             position_ids=text_dict['position_ids'],
             text_self_attention_masks=text_dict['masks'])
+        
+        memory_text_full = memory_text  # output of encoder
+        # split
+        memory_text = memory_text_full[:, :T, :]
+        desc_memory_text = memory_text_full[:, T:, :]
+
+        # masks
+        text_token_mask = aug_text_token_mask[:, :T]
+        desc_token_mask = aug_text_token_mask[:, T:]
+
+        desc_encoder_outputs_dict = dict(
+            desc_memory_text= desc_memory_text,
+            desc_token_mask = desc_token_mask
+        )
         encoder_outputs_dict = dict(
             memory=memory,
             memory_mask=feat_mask,
             spatial_shapes=spatial_shapes,
             memory_text=memory_text,
             text_token_mask=text_token_mask)
-        return encoder_outputs_dict
-
+        return encoder_outputs_dict, desc_encoder_outputs_dict
+    
     def pre_decoder(
         self,
         memory: Tensor,
@@ -489,6 +592,7 @@ class GroundingDINO(DINO):
             data_samples.gt_instances.text_token_mask = \
                 text_token_mask.unsqueeze(0).repeat(
                     len(positive_map), 1)
+        
         if self.use_autocast:
             with autocast(enabled=True):
                 visual_features = self.extract_feat(batch_inputs)
@@ -591,13 +695,223 @@ class GroundingDINO(DINO):
                     is_rec_tasks.append(True)
                 data_samples.token_positive_map = token_positive_maps[i]
 
-            head_inputs_dict = self.forward_transformer(
+            # Code added for descriptor prompts
+            all_embeddings = []
+            all_masks = []
+            class_embed_list = []
+            start_idx_global = 0
+            descriptor_ranges_per_class = []
+
+            bs = len(text_prompts)
+
+            for cls_name, desc_list in CLASS_DESCRIPTOR_PROMPTS.items():
+
+                # =========================
+                #  STEP 1: CLASS EMBEDDING
+                # =========================
+                text_dict_cls = self.language_model([cls_name])
+
+                if self.text_feat_map is not None:
+                    text_dict_cls['embedded'] = self.text_feat_map(text_dict_cls['embedded'])
+
+                cls_emb = text_dict_cls['embedded']          # [1, t, C]
+                cls_mask = text_dict_cls['text_token_mask']  # [1, t]
+
+                # mean pooling (VERY IMPORTANT)
+                cls_emb = (cls_emb * cls_mask.unsqueeze(-1)).sum(dim=1) / cls_mask.sum(dim=1, keepdim=True)
+
+                class_embed_list.append(cls_emb)  # [1, C]
+
+                # =========================
+                # STEP 2: DESCRIPTORS
+                # =========================
+                descriptor_embeds = []
+                descriptor_masks = []
+                descriptor_ranges = []
+
+                for desc in desc_list:
+                    text_dict_i = self.language_model([desc])
+
+                    if self.text_feat_map is not None:
+                        text_dict_i['embedded'] = self.text_feat_map(text_dict_i['embedded'])
+
+                    emb = text_dict_i['embedded']         # [1, t_i, C]
+                    mask = text_dict_i['text_token_mask'] # [1, t_i]
+
+                    t_i = mask.shape[1]  # correct token length
+
+                    emb = emb.repeat(bs, 1, 1)
+                    mask = mask.repeat(bs, 1)
+
+                    descriptor_embeds.append(emb)
+                    descriptor_masks.append(mask)
+                    descriptor_ranges.append((start_idx_global, start_idx_global + t_i))
+                    start_idx_global += t_i
+
+                # concat descriptors of this class
+                class_wise_descriptor_embeds = torch.cat(descriptor_embeds, dim=1)   # [bs, Mk, C]
+                class_wise_descriptor_masks = torch.cat(descriptor_masks, dim=1)     # [bs, Mk]
+                
+                all_embeddings.append(class_wise_descriptor_embeds)
+                all_masks.append(class_wise_descriptor_masks)
+                
+                descriptor_ranges_per_class.append(descriptor_ranges)
+
+            # =========================
+            # FINAL OUTPUTS
+            # =========================
+            descriptor_embedded = torch.cat(all_embeddings, dim=1)  # [bs, total_tokens, C]
+            descriptor_mask = torch.cat(all_masks, dim=1)           # [bs, total_tokens]
+
+            class_embeds = torch.cat(class_embed_list, dim=0)       # [K, C]
+            descriptor_ranges_per_class
+            
+            memory_text= text_dict['embedded']
+            text_token_mask = text_dict['text_token_mask']
+            device = memory_text.device
+            # concat
+            augmented_text = torch.cat([memory_text, descriptor_embedded], dim=1)
+            aug_text_token_mask = torch.cat([text_token_mask, descriptor_mask], dim=1)
+
+            # sizes
+            bs, T, _ = memory_text.shape
+            D = descriptor_embedded.shape[1]
+            N = T + D
+
+            # init
+            new_mask = torch.zeros(bs, N, N, dtype=torch.bool, device=device)
+
+            # preserve text structure
+            new_mask[:, :T, :T] = text_token_mask
+
+            # positive map
+            pos_map = token_positive_maps[0]
+            text_indices_per_class = {
+                cls_id: torch.tensor(token_ids, device=device)
+                for cls_id, token_ids in pos_map.items()
+            }
+
+            # descriptor indices
+            desc_indices_per_class = []
+            for class_ranges in descriptor_ranges_per_class:
+                indices = []
+                for (s, e) in class_ranges:
+                    indices.extend(range(T + s, T + e))
+                desc_indices_per_class.append(torch.tensor(indices, device=device))
+
+            # align text ↔ descriptor
+            for i, (cls_id, text_indices) in enumerate(sorted(text_indices_per_class.items())):
+                desc_indices = desc_indices_per_class[i]
+
+                new_mask[:, desc_indices[:, None], text_indices[None, :]] = 1
+                new_mask[:, text_indices[:, None], desc_indices[None, :]] = 1
+
+            # descriptor intra-class attention
+            for indices in desc_indices_per_class:
+                new_mask[:, indices[:, None], indices[None, :]] = 1
+
+            # ensure self-attention
+            diag_idx = torch.arange(N, device=device)
+            new_mask[:, diag_idx, diag_idx] = 1
+
+            full_mask = aug_text_token_mask 
+            new_mask = new_mask & full_mask[:, :, None] & full_mask[:, None, :]
+
+            #Position_ids : Class Aware positions. This encodes; intra-descriptor order and inter-class separation
+            descriptor_position_ids = torch.zeros(bs, D, device=device)
+            for class_id, class_ranges in enumerate(descriptor_ranges_per_class):
+                for (s, e) in class_ranges:
+                    length = e - s
+                    descriptor_position_ids[:, s:e] = (
+                        torch.arange(length, device=device) + class_id * 100
+                    )
+            position_ids_aug = torch.cat(
+                [text_dict['position_ids'], descriptor_position_ids],
+                dim=1
+            )
+
+            text_dict = {
+                'embedded': augmented_text,
+                'text_token_mask': aug_text_token_mask,
+                'position_ids': position_ids_aug,
+                'masks': new_mask
+            }
+
+            head_inputs_dict, desc_encoder_output = self.forward_transformer(
                 visual_feats, text_dict, batch_data_samples)
+            descriptor_embedded = desc_encoder_output['desc_memory_text']
+            descriptor_mask = desc_encoder_output['desc_token_mask']
             results_list = self.bbox_head.predict(
                 **head_inputs_dict,
                 rescale=rescale,
-                batch_data_samples=batch_data_samples)
+                batch_data_samples=batch_data_samples,
+                descriptor_embedded=descriptor_embedded,
+                descriptor_mask=descriptor_mask,
+                # class_embeds=class_embeds,
+                descriptor_ranges_per_class=descriptor_ranges_per_class)
 
+        for i, pred_instances in enumerate(results_list):
+
+            if len(pred_instances) == 0:
+                continue
+
+            scores = pred_instances.scores
+            desc_conf = pred_instances.desc_conf
+
+            pred_labels = pred_instances.labels
+            desc_labels = pred_instances.desc_labels
+
+            gt_labels = batch_data_samples[i].gt_instances.labels
+
+            sorted_idx_cls = scores.argsort(descending=True)
+            sorted_idx_desc = desc_conf.argsort(descending=True)
+
+            pred_labels_sorted = pred_labels[sorted_idx_cls]
+            desc_labels_sorted = desc_labels[sorted_idx_desc]
+
+            for K in self.Ks:
+
+                K_eff = min(K, len(pred_labels_sorted))
+
+                topk_cls = pred_labels_sorted[:K_eff]
+                topk_desc = desc_labels_sorted[:K_eff]
+
+                matches_cls = 0
+                matches_desc = 0
+
+                used_gt_cls = set()
+                used_gt_desc = set()
+
+                # class-based
+                for p in topk_cls:
+                    for j, gt in enumerate(gt_labels):
+                        if p == gt and j not in used_gt_cls:
+                            matches_cls += 1
+                            used_gt_cls.add(j)
+                            break
+
+                # descriptor-based
+                for p in topk_desc:
+                    for j, gt in enumerate(gt_labels):
+                        if p == gt and j not in used_gt_desc:
+                            matches_desc += 1
+                            used_gt_desc.add(j)
+                            break
+
+                self.total_matches_cls[K] += matches_cls
+                self.total_matches_desc[K] += matches_desc
+
+            self.total_samples += 1
+
+        if(self.total_samples == 20):
+            for K in self.Ks:
+                precision = self.total_matches_cls[K] / (K * self.total_samples)
+                avg_matches = self.total_matches_cls[K] / self.total_samples
+                print(f"Top-{K}: Avg Matches for Contrastive Embed score = {avg_matches:.2f} | Precision = {precision:.4f}")
+                precision = self.total_matches_desc[K] / (K * self.total_samples)
+                avg_matches = self.total_matches_desc[K] / self.total_samples
+                print(f"Top-{K}: Avg Matches for WCA score = {avg_matches:.2f} | Precision = {precision:.4f}")
+        
         for data_sample, pred_instances, entity, is_rec_task in zip(
                 batch_data_samples, results_list, entities, is_rec_tasks):
             if len(pred_instances) > 0:
