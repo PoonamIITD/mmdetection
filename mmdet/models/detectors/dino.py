@@ -272,6 +272,7 @@ class DINO(DeformableDETR):
             level_start_index=level_start_index,
             valid_ratios=valid_ratios,
             reg_branches=self.bbox_head.reg_branches,
+            save_flag = True,
             **kwargs)
 
         if len(query) == self.num_queries:

@@ -326,61 +326,118 @@ class GroundingDINOHead(DINOHead):
 
         outs = self(hidden_states, references, memory_text, text_token_mask)
 
-        predictions = self.predict_by_feat(
+        predictions, per_layer_cls_scores = self.predict_by_feat(
             *outs,
             batch_img_metas=batch_img_metas,
             batch_token_positive_maps=batch_token_positive_maps,
             rescale=rescale)
-        return predictions
+        return predictions, per_layer_cls_scores
+
+    # def predict_by_feat(self,
+    #                     all_layers_cls_scores: Tensor,
+    #                     all_layers_bbox_preds: Tensor,
+    #                     batch_img_metas: List[Dict],
+    #                     batch_token_positive_maps: Optional[List[dict]] = None,
+    #                     rescale: bool = False) -> InstanceList:
+    #     """Transform a batch of output features extracted from the head into
+    #     bbox results.
+
+    #     Args:
+    #         all_layers_cls_scores (Tensor):  Classification scores of all
+    #             decoder layers, has shape (num_decoder_layers, bs, num_queries,
+    #             cls_out_channels).
+    #         all_layers_bbox_preds (Tensor): Regression outputs of all decoder
+    #             layers. Each is a 4D-tensor with normalized coordinate format
+    #             (cx, cy, w, h) and shape (num_decoder_layers, bs, num_queries,
+    #             4) with the last dimension arranged as (cx, cy, w, h).
+    #         batch_img_metas (List[Dict]): _description_
+    #         batch_token_positive_maps (list[dict], Optional): Batch token
+    #             positive map. Defaults to None.
+    #         rescale (bool): If True, return boxes in original image space.
+    #             Defaults to False.
+
+    #     Returns:
+    #         list[:obj:`InstanceData`]: Object detection results of each image
+    #         after the post process. Each item usually contains following keys.
+
+    #             - scores (Tensor): Classification scores, has a shape
+    #               (num_instance, )
+    #             - labels (Tensor): Labels of bboxes, has a shape
+    #               (num_instances, ).
+    #             - bboxes (Tensor): Has a shape (num_instances, 4),
+    #               the last dimension 4 arrange as (x1, y1, x2, y2).
+    #     """
+    #     cls_scores = all_layers_cls_scores[-1]
+    #     bbox_preds = all_layers_bbox_preds[-1]
+    #     result_list = []
+    #     for img_id in range(len(batch_img_metas)):
+    #         cls_score = cls_scores[img_id]
+    #         bbox_pred = bbox_preds[img_id]
+    #         img_meta = batch_img_metas[img_id]
+    #         token_positive_maps = batch_token_positive_maps[img_id]
+    #         results = self._predict_by_feat_single(cls_score, bbox_pred,
+    #                                                token_positive_maps,
+    #                                                img_meta, rescale)
+    #         result_list.append(results)
+    #     return result_list
 
     def predict_by_feat(self,
-                        all_layers_cls_scores: Tensor,
-                        all_layers_bbox_preds: Tensor,
-                        batch_img_metas: List[Dict],
-                        batch_token_positive_maps: Optional[List[dict]] = None,
-                        rescale: bool = False) -> InstanceList:
-        """Transform a batch of output features extracted from the head into
-        bbox results.
+                    all_layers_cls_scores: Tensor,
+                    all_layers_bbox_preds: Tensor,
+                    batch_img_metas: List[Dict],
+                    batch_token_positive_maps: Optional[List[dict]] = None,
+                    rescale: bool = False) -> InstanceList:
 
-        Args:
-            all_layers_cls_scores (Tensor):  Classification scores of all
-                decoder layers, has shape (num_decoder_layers, bs, num_queries,
-                cls_out_channels).
-            all_layers_bbox_preds (Tensor): Regression outputs of all decoder
-                layers. Each is a 4D-tensor with normalized coordinate format
-                (cx, cy, w, h) and shape (num_decoder_layers, bs, num_queries,
-                4) with the last dimension arranged as (cx, cy, w, h).
-            batch_img_metas (List[Dict]): _description_
-            batch_token_positive_maps (list[dict], Optional): Batch token
-                positive map. Defaults to None.
-            rescale (bool): If True, return boxes in original image space.
-                Defaults to False.
+        num_layers = all_layers_cls_scores.shape[0]
 
-        Returns:
-            list[:obj:`InstanceData`]: Object detection results of each image
-            after the post process. Each item usually contains following keys.
-
-                - scores (Tensor): Classification scores, has a shape
-                  (num_instance, )
-                - labels (Tensor): Labels of bboxes, has a shape
-                  (num_instances, ).
-                - bboxes (Tensor): Has a shape (num_instances, 4),
-                  the last dimension 4 arrange as (x1, y1, x2, y2).
-        """
+        # final layer for actual prediction (UNCHANGED)
         cls_scores = all_layers_cls_scores[-1]
         bbox_preds = all_layers_bbox_preds[-1]
+
         result_list = []
+        per_layer_cls_scores_list = []
+
         for img_id in range(len(batch_img_metas)):
+
             cls_score = cls_scores[img_id]
             bbox_pred = bbox_preds[img_id]
             img_meta = batch_img_metas[img_id]
-            token_positive_maps = batch_token_positive_maps[img_id]
-            results = self._predict_by_feat_single(cls_score, bbox_pred,
-                                                   token_positive_maps,
-                                                   img_meta, rescale)
-            result_list.append(results)
-        return result_list
 
+            token_positive_maps = (
+                batch_token_positive_maps[img_id]
+                if batch_token_positive_maps is not None else None
+            )
+
+            per_layer_cls_scores = []
+
+            for l in range(num_layers):
+                cls_score_l = all_layers_cls_scores[l, img_id]
+
+                if token_positive_maps is not None:
+                    cls_score_l = convert_grounding_to_cls_scores(
+                        logits=cls_score_l.sigmoid()[None],
+                        positive_maps=[token_positive_maps]
+                    )[0]
+                else:
+                    cls_score_l = cls_score_l.sigmoid()
+
+                per_layer_cls_scores.append(cls_score_l.detach().cpu())
+
+            # ✅ IMPORTANT FIX
+            per_layer_cls_scores = torch.stack(per_layer_cls_scores)  # [L, Q, C]
+            per_layer_cls_scores_list.append(per_layer_cls_scores)
+
+            results = self._predict_by_feat_single(
+                cls_score, bbox_pred,
+                token_positive_maps,
+                img_meta, rescale
+            )
+            result_list.append(results)
+
+        # ✅ Final stack
+        per_layer_cls_scores_all = torch.stack(per_layer_cls_scores_list)  # [bs, L, Q, C]
+
+        return result_list, per_layer_cls_scores_all
     def _predict_by_feat_single(self,
                                 cls_score: Tensor,
                                 bbox_pred: Tensor,

@@ -309,16 +309,18 @@ class GroundingDINO(DINO):
         encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
             img_feats, batch_data_samples)
 
-        encoder_outputs_dict = self.forward_encoder(
+        encoder_outputs_dict, spatial_shapes, level_start_index, valid_ratios = self.forward_encoder(
             **encoder_inputs_dict, text_dict=text_dict)
-
+        
         tmp_dec_in, head_inputs_dict = self.pre_decoder(
             **encoder_outputs_dict, batch_data_samples=batch_data_samples)
+        
         decoder_inputs_dict.update(tmp_dec_in)
 
         decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
+        
         head_inputs_dict.update(decoder_outputs_dict)
-        return head_inputs_dict
+        return head_inputs_dict, spatial_shapes, valid_ratios, level_start_index
 
     def forward_encoder(self, feat: Tensor, feat_mask: Tensor,
                         feat_pos: Tensor, spatial_shapes: Tensor,
@@ -343,7 +345,7 @@ class GroundingDINO(DINO):
             spatial_shapes=spatial_shapes,
             memory_text=memory_text,
             text_token_mask=text_token_mask)
-        return encoder_outputs_dict
+        return encoder_outputs_dict, spatial_shapes, level_start_index, valid_ratios
 
     def pre_decoder(
         self,
@@ -591,12 +593,62 @@ class GroundingDINO(DINO):
                     is_rec_tasks.append(True)
                 data_samples.token_positive_map = token_positive_maps[i]
 
-            head_inputs_dict = self.forward_transformer(
+            head_inputs_dict, spatial_shapes, valid_ratios, level_start_index = self.forward_transformer(
                 visual_feats, text_dict, batch_data_samples)
-            results_list = self.bbox_head.predict(
+            
+            import torch
+            import os
+            
+            sampling =  torch.stack(self.decoder.all_sampling_locations)
+            attn =  torch.stack(self.decoder.all_attention_weights)
+            references = torch.stack(head_inputs_dict["references"])
+            
+
+            results_list, per_layer_cls_scores = self.bbox_head.predict(
                 **head_inputs_dict,
                 rescale=rescale,
                 batch_data_samples=batch_data_samples)
+            
+            # --------------------------------------
+            # 🟢 ATTACH PER-IMAGE (bs = 1)
+            # --------------------------------------
+            # for img_id, results in enumerate(results_list):
+
+            #     results.debug = getattr(results, "debug", {})  # keep existing if any
+
+            #     results.debug.update({
+            #         "sampling_locations": sampling[:, img_id].detach().cpu(),
+            #         "attention_weights": attn[:, img_id].detach().cpu(),
+            #         "reference_points": references[:, img_id].detach().cpu()
+            #     })
+
+            save_dir = "debug_outputs"
+            os.makedirs(save_dir, exist_ok=True)
+            if not hasattr(self, "_debug_saved"):
+                self._debug_saved = 0
+
+            MAX_SAVE = 50
+
+            for img_id, results in enumerate(results_list):
+                
+                if self._debug_saved >= MAX_SAVE:
+                    break
+                img_name = os.path.basename(batch_data_samples[img_id].img_path)
+                filename = os.path.join(save_dir, img_name.replace(".jpg", ".pt"))
+
+                data = {
+                    "cls_scores": per_layer_cls_scores[img_id],  # full precision.  # [decoder_L, Q, C]
+                    "sampling_locations": sampling[:, img_id].detach().cpu(),  # [decoder_L, Q, H, Lv, P, 2]
+                    "attention_weights": attn[:, img_id].detach().cpu(),       # [decoder_L, Q, H, Lv, P]
+                    "reference_points": references[:, img_id].detach().cpu(),   # [decoder_L +1, Q, 4]
+                    "spatial_shapes": spatial_shapes.detach().cpu(),          # same for all images [num_levels,2]
+                    "valid_ratios": valid_ratios[img_id].detach().cpu(),       # per image [num_levels,2]
+                    "level_start_index": level_start_index.detach().cpu()     # same for all images [num_levels,]
+                }
+
+                torch.save(data, filename)
+                self._debug_saved += 1
+
 
         for data_sample, pred_instances, entity, is_rec_task in zip(
                 batch_data_samples, results_list, entities, is_rec_tasks):

@@ -249,7 +249,8 @@ class GroundingDinoTransformerEncoder(DeformableDetrTransformerEncoder):
                 reference_points=reference_points,
                 spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index,
-                key_padding_mask=key_padding_mask)
+                key_padding_mask=key_padding_mask,
+                save_flag= False)
         return output, memory_text
 
 
@@ -268,3 +269,5 @@ class GroundingDinoTransformerDecoder(DinoTransformerDecoder):
         self.ref_point_head = MLP(self.embed_dims * 2, self.embed_dims,
                                   self.embed_dims, 2)
         self.norm = nn.LayerNorm(self.embed_dims)
+        self.all_sampling_locations = None
+        self.all_attention_weights = None
