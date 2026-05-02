@@ -633,8 +633,8 @@ class GroundingDINO(DINO):
                 
                 if self._debug_saved >= MAX_SAVE:
                     break
-                img_name = os.path.basename(batch_data_samples[img_id].img_path)
-                filename = os.path.join(save_dir, img_name.replace(".jpg", ".pt"))
+                # img_name = os.path.basename(batch_data_samples[img_id].img_path)
+                # filename = os.path.join(save_dir, img_name.replace(".jpg", ".pt"))
 
                 data = {
                     "cls_scores": per_layer_cls_scores[img_id],  # full precision.  # [decoder_L, Q, C]
@@ -643,12 +643,12 @@ class GroundingDINO(DINO):
                     "reference_points": references[:, img_id].detach().cpu(),   # [decoder_L +1, Q, 4]
                     "spatial_shapes": spatial_shapes.detach().cpu(),          # same for all images [num_levels,2]
                     "valid_ratios": valid_ratios[img_id].detach().cpu(),       # per image [num_levels,2]
-                    "level_start_index": level_start_index.detach().cpu()     # same for all images [num_levels,]
+                    "level_start_index": level_start_index.detach().cpu(),     # same for all images [num_levels,]
+                    "img_path": batch_data_samples[img_id].img_path
                 }
-
+                filename = os.path.join(save_dir, f"{self._debug_saved:05d}.pt")
                 torch.save(data, filename)
                 self._debug_saved += 1
-
 
         for data_sample, pred_instances, entity, is_rec_task in zip(
                 batch_data_samples, results_list, entities, is_rec_tasks):
