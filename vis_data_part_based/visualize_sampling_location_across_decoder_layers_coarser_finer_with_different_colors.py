@@ -43,46 +43,129 @@ def select_low_conf_query(cls_scores, layer=-1, target_score=0.1):
 
     return q_idx, max_scores[q_idx].item()
 
-# --------------------------------------------------
-# 🔵 Plot score evolution
-# --------------------------------------------------
-# def plot_score_curve(cls_scores, q_idx, save_dir):
-#     L = cls_scores.shape[0]
+import math
 
-#     scores_per_layer = cls_scores[:, q_idx]  # [L, C]
-#     best_class = scores_per_layer[-1].argmax().item()
-#     score_curve = scores_per_layer[:, best_class].cpu().numpy()
+def get_gt_box_norm(gt_bbox, image_path):
+    """
+    gt_bbox: [x, y, w, h] in pixel coordinates
+    returns normalized GT center and box size
+    """
+    img = cv2.imread(image_path)
+    if img is None:
+        raise RuntimeError(f"Could not read image: {image_path}")
 
-#     plt.figure()
-#     plt.plot(range(L), score_curve, marker='o')
-#     plt.xlabel("Layer")
-#     plt.ylabel("Score")
-#     plt.title(f"Query {q_idx} | Class {best_class}")
-#     plt.grid()
+    H, W = img.shape[:2]
+    x, y, w, h = gt_bbox
 
-#     plt.savefig(os.path.join(save_dir, "score_curve.png"))
-#     plt.close()
+    cx = (x + w / 2.0) / W
+    cy = (y + h / 2.0) / H
+    bw = w / W
+    bh = h / H
+
+    return cx, cy, bw, bh
+
+
+def find_query_ids_close_to_gt(
+    data,
+    image_path,
+    gt_bbox,
+    layer=-1,
+    margin_ratio=0.15,
+    dist_ratio=0.35,
+    topk=None,
+):
+    """
+    Return query ids whose reference points are close to the GT box.
+
+    A query is selected if:
+      1) its reference point lies inside an expanded GT box, OR
+      2) its distance to GT center is within a threshold.
+
+    Args:
+        data: dict loaded from .pt
+        image_path: path to image
+        gt_bbox: [x, y, w, h] in pixel coordinates
+        layer: decoder layer to inspect (default: last)
+        margin_ratio: expands GT box on each side
+        dist_ratio: distance threshold relative to GT diagonal
+        topk: optionally keep only top-k closest queries
+
+    Returns:
+        query_ids: list[int]
+        distances: 1D tensor of distances for all queries
+    """
+    refs = data["reference_points"]   # expected [L, Q, 2] or [L, Q, 4]
+    if refs.dim() == 3:
+        refs_l = refs[layer]          # [Q, 2] or [Q, 4]
+    else:
+        raise ValueError(f"Unexpected reference_points shape: {refs.shape}")
+
+    # use only x,y
+    refs_xy = refs_l[:, :2]
+
+    cx, cy, bw, bh = get_gt_box_norm(gt_bbox, image_path)
+
+    # expanded GT box bounds in normalized coordinates
+    x1 = cx - (bw / 2.0) * (1.0 + margin_ratio)
+    y1 = cy - (bh / 2.0) * (1.0 + margin_ratio)
+    x2 = cx + (bw / 2.0) * (1.0 + margin_ratio)
+    y2 = cy + (bh / 2.0) * (1.0 + margin_ratio)
+
+    # clamp to valid range
+    x1 = max(0.0, x1)
+    y1 = max(0.0, y1)
+    x2 = min(1.0, x2)
+    y2 = min(1.0, y2)
+
+    rx = refs_xy[:, 0]
+    ry = refs_xy[:, 1]
+
+    inside = (rx >= x1) & (rx <= x2) & (ry >= y1) & (ry <= y2)
+
+    # normalized distance to GT center
+    d = torch.sqrt((rx - cx) ** 2 + (ry - cy) ** 2)
+    gt_diag = math.sqrt(bw ** 2 + bh ** 2)
+    near = d <= (dist_ratio * gt_diag)
+
+    mask = inside | near
+    query_ids = torch.where(mask)[0]
+
+    # optionally keep only closest queries
+    if topk is not None and query_ids.numel() > topk:
+        qd = d[query_ids]
+        order = torch.argsort(qd)
+        query_ids = query_ids[order[:topk]]
+
+    return query_ids.tolist(), d
 
 def plot_score_curve(cls_scores, q_idx, save_dir, class_names=None):
     """
     cls_scores: [L, Q, C]
     """
+
     L = cls_scores.shape[0]
 
     scores_per_layer = cls_scores[:, q_idx]  # [L, C]
 
-    # 🔥 per-layer best class + score
-    best_scores, best_classes = scores_per_layer.max(dim=1)  # [L]
+    # best class + score per layer
+    best_scores, best_classes = scores_per_layer.max(dim=1)
 
     score_curve = best_scores.cpu().numpy()
     class_curve = best_classes.cpu().numpy()
 
-    # 🔵 Plot score curve
+    # 🔥 overall maximum confidence
+    max_conf = best_scores.max().item()
+
+    # 🔥 layer where max occurs
+    max_layer = best_scores.argmax().item()
+
+    # 🔵 Plot
     plt.figure(figsize=(8, 5))
     plt.plot(range(L), score_curve, marker='o')
 
-    # 🔥 annotate class at each layer
+    # annotate class name
     for l in range(L):
+
         cls_id = class_curve[l]
 
         if class_names is not None:
@@ -94,10 +177,18 @@ def plot_score_curve(cls_scores, q_idx, save_dir, class_names=None):
 
     plt.xlabel("Decoder Layer")
     plt.ylabel("Confidence")
-    plt.title(f"Query {q_idx} evolution")
+
+    # 🔥 title includes max score
+    plt.title(
+        f"Query {q_idx} | Max Conf: {max_conf:.3f} @ Layer {max_layer}"
+    )
+
     plt.grid()
 
-    plt.savefig(os.path.join(save_dir, "score_curve.png"))
+    # 🔥 filename also contains max confidence
+    save_name = f"score_curve_max_{max_conf:.3f}.png"
+
+    plt.savefig(os.path.join(save_dir, save_name))
     plt.close()
 
 # --------------------------------------------------
@@ -177,19 +268,45 @@ def process_file(data, image_path, save_dir, idx):
 
     cls_scores = data["cls_scores"]  # [L, Q, C]
 
-    # 🔵 Select best query
-    q_idx = select_best_query(cls_scores)
-    print(f"[INFO] Processing {image_path} → Query {q_idx}")
+    # # 🔵 Select best query
+    # q_idx = select_best_query(cls_scores)
+    # print(f"[INFO] Processing {image_path} → Query {q_idx}")
 
     #select low_conf_query
     # q_idx, score = select_low_conf_query(cls_scores, layer=-1, target_score=0.3)
     # print(f"[INFO] Selected query {q_idx} with initial score {score:.3f}")
 
-    # 🔵 Score curve
-    plot_score_curve(cls_scores, q_idx, save_dir, class_names=RSUD_CLASSES)
+    # q_idx = 14
 
-    # 🔴 Sampling overlays
-    overlay_sampling(data, image_path, q_idx, save_dir)
+    # Example GT bbox from your annotation:
+    gt_bbox = [24.26, 492.39, 103.28, 125.57]
+
+    # collect all query ids close to GT
+    q_ids, dists = find_query_ids_close_to_gt(
+        data,
+        image_path,
+        gt_bbox,
+        layer=-1,          # inspect last decoder layer
+        margin_ratio=0.15, # tune this
+        dist_ratio=0.35,   # tune this
+        topk=None          # or set e.g. 5
+    )
+
+    print(f"[INFO] Found {len(q_ids)} queries close to GT: {q_ids}")
+
+    # plot for every selected query
+    for q_idx in q_ids:
+        q_dir = os.path.join(save_dir, f"query_{q_idx}")
+        os.makedirs(q_dir, exist_ok=True)
+
+        plot_score_curve(cls_scores, q_idx, q_dir, class_names=RSUD_CLASSES)
+        overlay_sampling(data, image_path, q_idx, q_dir)
+
+    # # 🔵 Score curve
+    # plot_score_curve(cls_scores, q_idx, save_dir, class_names=RSUD_CLASSES)
+
+    # # 🔴 Sampling overlays
+    # overlay_sampling(data, image_path, q_idx, save_dir)
 
 
 # --------------------------------------------------
@@ -199,7 +316,8 @@ def main():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--pt_dir", type=str, required=True)
-    parser.add_argument("--output", type=str, default="vis_outputs_across_decoder_layers_best")
+    parser.add_argument("--image_name", type=str, required=True)
+    parser.add_argument("--output", type=str, default="vis_outputs_across_decoder_layers_impainted_queries_near_to GT")
 
     args = parser.parse_args()
 
@@ -207,27 +325,40 @@ def main():
 
     os.makedirs(args.output, exist_ok=True)
 
+    found = False
+
     for idx, pt_file in enumerate(pt_files):
 
-        # 🔥 Load pt file FIRST
         data = torch.load(pt_file)
 
-        # 🔥 Get image path directly (no guessing)
         image_path = data["img_path"]
 
         if not os.path.exists(image_path):
             print(f"[WARN] Missing image: {image_path}")
             continue
 
-        # 🔥 Better folder naming (use actual image name)
-        img_name = Path(image_path).stem
-        save_dir = os.path.join(args.output, img_name)
+        img_filename = Path(image_path).name   # 🔥 full filename
+
+        # process only requested image
+        if img_filename != args.image_name:
+            continue
+
+        found = True
+
+        save_dir = os.path.join(
+            args.output,
+            Path(image_path).stem
+        )
         os.makedirs(save_dir, exist_ok=True)
 
-        print(f"[INFO] Processing {pt_file} → {image_path}")
+        print(f"[INFO] Processing ONLY: {img_filename}")
 
-        # 🔥 Pass data directly (no re-load inside)
         process_file(data, image_path, save_dir, idx)
+
+        break
+
+    if not found:
+        print(f"[ERROR] Image {args.image_name} not found.")
 
 
 if __name__ == "__main__":

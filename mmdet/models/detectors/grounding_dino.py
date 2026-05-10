@@ -622,12 +622,12 @@ class GroundingDINO(DINO):
             #         "reference_points": references[:, img_id].detach().cpu()
             #     })
 
-            save_dir = "debug_outputs"
+            save_dir = "debug_outputs_7"
             os.makedirs(save_dir, exist_ok=True)
             if not hasattr(self, "_debug_saved"):
                 self._debug_saved = 0
 
-            MAX_SAVE = 50
+            MAX_SAVE = 7 #50
 
             for img_id, results in enumerate(results_list):
                 
