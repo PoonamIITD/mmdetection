@@ -26,7 +26,10 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
     def forward(self, query: Tensor, value: Tensor, key_padding_mask: Tensor,
                 self_attn_mask: Tensor, reference_points: Tensor,
                 spatial_shapes: Tensor, level_start_index: Tensor,
-                valid_ratios: Tensor, reg_branches: nn.ModuleList,
+                valid_ratios: Tensor, reg_branches: nn.ModuleList, 
+                save_flag: bool, selected_query_ids: Tensor = None,
+                target_gt_boxes: Tensor = None,
+                nudge_x: float= 0.0, nudge_y: float= 0.0,
                 **kwargs) -> Tuple[Tensor]:
         """Forward function of Transformer decoder.
 
@@ -70,6 +73,12 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
         """
         intermediate = []
         intermediate_reference_points = [reference_points]
+
+        if (save_flag):
+            self.all_sampling_locations = []
+            self.all_attention_weights = []
+            self.all_selected_query_ids = []
+
         for lid, layer in enumerate(self.layers):
             if reference_points.shape[-1] == 4:
                 reference_points_input = \
@@ -94,8 +103,17 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 level_start_index=level_start_index,
                 valid_ratios=valid_ratios,
                 reference_points=reference_points_input,
+                save_flag=save_flag,
+                selected_query_ids=selected_query_ids,
+                target_gt_boxes=target_gt_boxes,
+                nudge_x=nudge_x,
+                nudge_y=nudge_y,
                 **kwargs)
 
+            if save_flag :
+                self.all_sampling_locations.append(layer.cross_attn.sampling_locations)
+                self.all_attention_weights.append(layer.cross_attn.attention_weights_)
+            
             if reg_branches is not None:
                 tmp = reg_branches[lid](query)
                 assert reference_points.shape[-1] == 4

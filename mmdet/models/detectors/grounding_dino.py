@@ -309,7 +309,7 @@ class GroundingDINO(DINO):
         encoder_inputs_dict, decoder_inputs_dict = self.pre_transformer(
             img_feats, batch_data_samples)
 
-        encoder_outputs_dict = self.forward_encoder(
+        encoder_outputs_dict, spatial_shapes, level_start_index, valid_ratios = self.forward_encoder(
             **encoder_inputs_dict, text_dict=text_dict)
 
         tmp_dec_in, head_inputs_dict = self.pre_decoder(
@@ -318,7 +318,7 @@ class GroundingDINO(DINO):
 
         decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
         head_inputs_dict.update(decoder_outputs_dict)
-        return head_inputs_dict
+        return head_inputs_dict, spatial_shapes, valid_ratios, level_start_index
 
     def forward_encoder(self, feat: Tensor, feat_mask: Tensor,
                         feat_pos: Tensor, spatial_shapes: Tensor,
@@ -343,7 +343,7 @@ class GroundingDINO(DINO):
             spatial_shapes=spatial_shapes,
             memory_text=memory_text,
             text_token_mask=text_token_mask)
-        return encoder_outputs_dict
+        return encoder_outputs_dict, spatial_shapes, level_start_index, valid_ratios
 
     def pre_decoder(
         self,
@@ -396,6 +396,71 @@ class GroundingDINO(DINO):
             dn_mask, dn_meta = None, None
         reference_points = reference_points.sigmoid()
 
+        target_gt_boxes = None
+        selected_query_ids = None
+        nudge_y = 0.0
+        nudge_x = 0.0
+
+        # ---------------------------------------------------------
+        # target annotation lookup
+        # image_id -> target annotation bbox
+        # COCO bbox format = [x, y, w, h]
+        # ---------------------------------------------------------
+
+        TARGET_OBJECTS = {
+            824: [24.26, 492.39, 103.28, 125.57]
+        }
+        SELECTED_IDS = [10, 11, 12, 13, 15, 22, 28, 29, 32, 35, 41, 49, 55, 76, 82, 100, 117, 127, 129, 299, 355, 376, 405, 428, 436, 469, 486, 508, 624, 636, 656, 684, 709, 711, 722, 791, 805, 806, 822, 829, 837, 852, 887, 891]
+        import math
+
+        if batch_data_samples is not None:
+
+            
+
+            img_id = batch_data_samples[0].img_id
+
+            # -----------------------------------------------------
+            # only activate for target image
+            # -----------------------------------------------------
+
+            if img_id in TARGET_OBJECTS:
+
+                gt_bbox = TARGET_OBJECTS[img_id]
+
+                # -------------------------------------------------
+                # normalized xyxy GT box
+                # -------------------------------------------------
+
+                ori_h, ori_w = batch_data_samples[0].ori_shape   # (1080, 1920)
+
+                x, y, w, h = gt_bbox
+                x1 = x / ori_w        # 24.26  / 1920 = 0.0126
+                y1 = y / ori_h        # 492.39 / 1080 = 0.4559
+                x2 = (x + w) / ori_w  # 127.54 / 1920 = 0.0664
+                y2 = (y + h) / ori_h  # 617.96 / 1080 = 0.5722
+
+                # img_h, img_w = batch_data_samples[0].img_shape
+                # print(f"img_shape (used for norm): h={img_h}, w={img_w}")
+                # print(f"ori_shape: {batch_data_samples[0].ori_shape}")  # original image size
+                # print(f"GT box pixel: x={x:.1f}, y={y:.1f}, w={w:.1f}, h={h:.1f}")
+                # print(f"GT box normalized: x1={x1:.4f}, y1={y1:.4f}, x2={x2:.4f}, y2={y2:.4f}")
+
+                gt_box_norm = torch.tensor(
+                    [x1, y1, x2, y2],
+                    device=reference_points.device,
+                    dtype=reference_points.dtype
+                )
+
+                # 5 pixel in normalized space
+                nudge_x = 30.0 / ori_w  # 1/1920 = 0.000521
+                nudge_y = 30.0 / ori_h  # 1/1080 = 0.000926
+
+                target_gt_boxes = gt_box_norm.unsqueeze(0)
+                selected_query_ids = [
+                    torch.tensor(SELECTED_IDS, device=reference_points.device, dtype=torch.long)
+                ]  # list of length bs=1
+
+        
         decoder_inputs_dict = dict(
             query=query,
             memory=memory,
@@ -403,6 +468,11 @@ class GroundingDINO(DINO):
             dn_mask=dn_mask,
             memory_text=memory_text,
             text_attention_mask=~text_token_mask,
+            #New
+            selected_query_ids = selected_query_ids,
+            target_gt_boxes=target_gt_boxes,
+            nudge_x=nudge_x,
+            nudge_y=nudge_y
         )
         # NOTE DINO calculates encoder losses on scores and coordinates
         # of selected top-k encoder queries, while DeformDETR is of all
@@ -591,12 +661,63 @@ class GroundingDINO(DINO):
                     is_rec_tasks.append(True)
                 data_samples.token_positive_map = token_positive_maps[i]
 
-            head_inputs_dict = self.forward_transformer(
+            head_inputs_dict, spatial_shapes, valid_ratios, level_start_index = self.forward_transformer(
                 visual_feats, text_dict, batch_data_samples)
-            results_list = self.bbox_head.predict(
+            
+
+            import torch
+            import os
+            
+            sampling =  torch.stack(self.decoder.all_sampling_locations)
+            attn =  torch.stack(self.decoder.all_attention_weights)
+
+            references = torch.stack(head_inputs_dict["references"])
+
+            results_list, per_layer_cls_scores = self.bbox_head.predict(
                 **head_inputs_dict,
                 rescale=rescale,
                 batch_data_samples=batch_data_samples)
+            
+            # --------------------------------------
+            # 🟢 ATTACH PER-IMAGE (bs = 1)
+            # --------------------------------------
+            # for img_id, results in enumerate(results_list):
+
+            #     results.debug = getattr(results, "debug", {})  # keep existing if any
+
+            #     results.debug.update({
+            #         "sampling_locations": sampling[:, img_id].detach().cpu(),
+            #         "attention_weights": attn[:, img_id].detach().cpu(),
+            #         "reference_points": references[:, img_id].detach().cpu()
+            #     })
+
+            save_dir = "debug_outputs_sampling_locations_shift_188"
+            os.makedirs(save_dir, exist_ok=True)
+            if not hasattr(self, "_debug_saved"):
+                self._debug_saved = 0
+
+            MAX_SAVE = 7 #50
+
+            for img_id, results in enumerate(results_list):
+                
+                if self._debug_saved >= MAX_SAVE:
+                    break
+                # img_name = os.path.basename(batch_data_samples[img_id].img_path)
+                # filename = os.path.join(save_dir, img_name.replace(".jpg", ".pt"))
+
+                data = {
+                    "cls_scores": per_layer_cls_scores[img_id],  # full precision.  # [decoder_L, Q, C]
+                    "sampling_locations": sampling[:, img_id].detach().cpu(),  # [decoder_L, Q, H, Lv, P, 2]
+                    "attention_weights": attn[:, img_id].detach().cpu(),       # [decoder_L, Q, H, Lv, P]
+                    "reference_points": references[:, img_id].detach().cpu(),   # [decoder_L +1, Q, 4]
+                    "spatial_shapes": spatial_shapes.detach().cpu(),          # same for all images [num_levels,2]
+                    "valid_ratios": valid_ratios[img_id].detach().cpu(),       # per image [num_levels,2]
+                    "level_start_index": level_start_index.detach().cpu(),     # same for all images [num_levels,]
+                    "img_path": batch_data_samples[img_id].img_path
+                }
+                filename = os.path.join(save_dir, f"{self._debug_saved:05d}.pt")
+                torch.save(data, filename)
+                self._debug_saved += 1
 
         for data_sample, pred_instances, entity, is_rec_task in zip(
                 batch_data_samples, results_list, entities, is_rec_tasks):
