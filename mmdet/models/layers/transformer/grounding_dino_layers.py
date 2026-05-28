@@ -98,13 +98,15 @@ class GroundingDinoTransformerDecoderLayer(
             Tensor: forwarded results, has shape (bs, num_queries, dim).
         """
         # self attention
-        query = self.self_attn(
+        query, self_attn_weights = self.self_attn(
             query=query,
             key=query,
             value=query,
             query_pos=query_pos,
             key_pos=query_pos,
             attn_mask=self_attn_mask,
+            need_weights=True,
+            average_attn_weights=True,
             **kwargs)
         query = self.norms[0](query)
         # cross attention between query and text
@@ -129,7 +131,7 @@ class GroundingDinoTransformerDecoderLayer(
         query = self.ffn(query)
         query = self.norms[3](query)
 
-        return query
+        return query, self_attn_weights
 
 
 class GroundingDinoTransformerEncoder(DeformableDetrTransformerEncoder):
@@ -271,3 +273,4 @@ class GroundingDinoTransformerDecoder(DinoTransformerDecoder):
         self.norm = nn.LayerNorm(self.embed_dims)
         self.all_sampling_locations = None
         self.all_attention_weights = None
+        self.all_sampling_features = None

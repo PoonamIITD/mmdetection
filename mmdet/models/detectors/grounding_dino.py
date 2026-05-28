@@ -316,7 +316,7 @@ class GroundingDINO(DINO):
             **encoder_outputs_dict, batch_data_samples=batch_data_samples)
         
         decoder_inputs_dict.update(tmp_dec_in)
-
+   
         decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
         
         head_inputs_dict.update(decoder_outputs_dict)
@@ -601,8 +601,10 @@ class GroundingDINO(DINO):
             
             sampling =  torch.stack(self.decoder.all_sampling_locations)
             attn =  torch.stack(self.decoder.all_attention_weights)
+            sampled_features = torch.stack(self.decoder.all_sampling_features)
+            topk_vals = torch.stack(self.decoder.intermediate_self_attn_vals)
+            topk_idx = torch.stack(self.decoder.intermediate_self_attn_idx)
             references = torch.stack(head_inputs_dict["references"])
-            
 
             results_list, per_layer_cls_scores = self.bbox_head.predict(
                 **head_inputs_dict,
@@ -622,12 +624,12 @@ class GroundingDINO(DINO):
             #         "reference_points": references[:, img_id].detach().cpu()
             #     })
 
-            save_dir = "debug_outputs_7"
+            save_dir = "debug_outputs_complete_val_set_CAsampled_features_SAtopk_attn_score"
             os.makedirs(save_dir, exist_ok=True)
             if not hasattr(self, "_debug_saved"):
                 self._debug_saved = 0
 
-            MAX_SAVE = 7 #50
+            MAX_SAVE = 1004 #50
 
             for img_id, results in enumerate(results_list):
                 
@@ -638,9 +640,12 @@ class GroundingDINO(DINO):
 
                 data = {
                     "cls_scores": per_layer_cls_scores[img_id],  # full precision.  # [decoder_L, Q, C]
-                    "sampling_locations": sampling[:, img_id].detach().cpu(),  # [decoder_L, Q, H, Lv, P, 2]
-                    "attention_weights": attn[:, img_id].detach().cpu(),       # [decoder_L, Q, H, Lv, P]
-                    "reference_points": references[:, img_id].detach().cpu(),   # [decoder_L +1, Q, 4]
+                    "self_attn_topk_vals":topk_vals[:, img_id].detach().half().cpu(), # [decoder_L, Q, topk]
+                    "self_attn_topk_idx":topk_idx[:, img_id].detach().cpu(),  # [decoder_L, Q, topk]
+                    "sampling_locations": sampling[:, img_id].detach().half().cpu(),  # [decoder_L, Q, H, Lv, P, 2]
+                    "attention_weights": attn[:, img_id].detach().half().cpu(),       # [decoder_L, Q, H, Lv, P]
+                    "reference_points": references[:, img_id].detach().half().cpu(),   # [decoder_L +1, Q, 4]
+                    "sampled_features": sampled_features[:,img_id].detach().half().cpu(), # # [decoder_L, Q, C]
                     "spatial_shapes": spatial_shapes.detach().cpu(),          # same for all images [num_levels,2]
                     "valid_ratios": valid_ratios[img_id].detach().cpu(),       # per image [num_levels,2]
                     "level_start_index": level_start_index.detach().cpu(),     # same for all images [num_levels,]

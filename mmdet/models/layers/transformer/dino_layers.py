@@ -75,6 +75,10 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
         if (save_flag):
             self.all_sampling_locations = []
             self.all_attention_weights = []
+            self.all_sampling_features = []
+            self.intermediate_self_attn_vals = []
+            self.intermediate_self_attn_idx = []
+        
         for lid, layer in enumerate(self.layers):
             if reference_points.shape[-1] == 4:
                 reference_points_input = \
@@ -89,7 +93,7 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 reference_points_input[:, :, 0, :])
             query_pos = self.ref_point_head(query_sine_embed)
 
-            query = layer(
+            query, self_attention_weights = layer(
                 query,
                 query_pos=query_pos,
                 value=value,
@@ -102,9 +106,18 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 save_flag = save_flag,
                 **kwargs)
             
+            topk_vals, topk_idx = torch.topk(
+                self_attention_weights,
+                k=20,
+                dim=-1
+            )
+            
             if save_flag :
                 self.all_sampling_locations.append(layer.cross_attn.sampling_locations)
                 self.all_attention_weights.append(layer.cross_attn.attention_weights_)
+                self.all_sampling_features.append(layer.cross_attn.deformable_output_)
+                self.intermediate_self_attn_vals.append(topk_vals)
+                self.intermediate_self_attn_idx.append(topk_idx)
 
             if reg_branches is not None:
                 tmp = reg_branches[lid](query)

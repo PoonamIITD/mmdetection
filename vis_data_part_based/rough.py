@@ -207,6 +207,7 @@ def overlay_sampling(data, image_path, q_idx, save_dir):
     attn = data["attention_weights"]        # [L, Q, H, Lv, P]
     refs = data["reference_points"]
 
+    # print(sampling[0][8][0][0])
     # 🎨 Colors for 4 feature levels (BGR)
     level_colors = [
     (0, 0, 255),    # Level 0 → Red (finest)
@@ -230,22 +231,50 @@ def overlay_sampling(data, image_path, q_idx, save_dir):
 
             for h in range(H):
 
-                pts = sampling[l, q_idx, h, lv].cpu().numpy()       # [P, 2]
-                weights = attn[l, q_idx, h, lv].cpu().numpy()       # [P]
+                pts = sampling[l, q_idx, h, lv].cpu().numpy()   # [P, 2]
+                weights = attn[l, q_idx, h, lv].cpu().numpy()   # [P]
 
-                # 🔥 pick most important sampling point (max attention)
-                p_idx = np.argmax(weights)
+                # normalize weights for visualization
+                w_max = weights.max() + 1e-6
 
-                x = int(pts[p_idx, 0] * W_img)
-                y = int(pts[p_idx, 1] * H_img)
+                for p in range(len(pts)):
 
-                x = max(0, min(W_img - 1, x))
-                y = max(0, min(H_img - 1, y))
+                    # floating-point image coordinates
+                    x = pts[p, 0] * W_img
+                    y = pts[p, 1] * H_img
 
-                # 🔥 radius reflects importance
-                r = int(4 + 12 * weights[p_idx])
+                    # clamp
+                    x = max(0, min(W_img - 1, x))
+                    y = max(0, min(H_img - 1, y))
 
-                cv2.circle(canvas, (x, y), r, color, -1)
+                    # attention strength
+                    alpha = weights[p] / w_max
+
+                    # radius reflects attention
+                    r = int(2 + 10 * alpha)
+
+                    # draw point
+                    cv2.circle(
+                        canvas,
+                        (int(x), int(y)),
+                        r,
+                        color,
+                        -1
+                    )
+
+                    # optional: connect to reference point
+                    ref = refs[l, q_idx][:2].cpu().numpy()
+
+                    x_ref = int(ref[0] * W_img)
+                    y_ref = int(ref[1] * H_img)
+
+                    cv2.line(
+                        canvas,
+                        (x_ref, y_ref),
+                        (int(x), int(y)),
+                        color,
+                        1
+                    )
 
         # 🔵 reference point
         ref = refs[l, q_idx][:2].cpu().numpy()
@@ -264,62 +293,74 @@ def overlay_sampling(data, image_path, q_idx, save_dir):
 # 🔥 Main processing
 # --------------------------------------------------
 def process_file(data, image_path, save_dir, idx):
-    # data = torch.load(pt_path)
 
     cls_scores = data["cls_scores"]  # [L, Q, C]
 
-    # # 🔵 Select best query
-    # q_idx = select_best_query(cls_scores)
-    # print(f"[INFO] Processing {image_path} → Query {q_idx}")
+    # --------------------------------------------------
+    # Fixed target-related query ids
+    # obtained from last-layer GT matching
+    # --------------------------------------------------
 
-    #select low_conf_query
-    # q_idx, score = select_low_conf_query(cls_scores, layer=-1, target_score=0.3)
-    # print(f"[INFO] Selected query {q_idx} with initial score {score:.3f}")
+    TARGET_QUERY_IDS = [
+        10, 11, 12, 13, 15, 22, 28, 29, 32, 35,
+        41, 49, 55, 76, 82, 100, 117, 127, 129,
+        299, 355, 376, 405, 428, 436, 469, 486,
+        508, 624, 636, 656, 684, 709, 711, 722,
+        791, 805, 806, 822, 829, 837, 852, 887,
+        891
+    ]
 
-    # q_idx = 14
-
-    # Example GT bbox from your annotation:
-    # gt_bbox = [24.26, 492.39, 103.28, 125.57] #val 16
-    # gt_bbox =[455.09, 656.76, 82.34, 146.79] #val 5
-    # gt_bbox = [554.78, 488.87, 135.26, 438.34] #val35
-    # gt_bbox = [1164.3, 579.8, 90.16, 102.32] #val36
-    # gt_bbox = [716.73, 507.87, 106.23, 416.18] #val27
-    # gt_bbox = [537.97, 548.82, 39.68, 92.72] #val40
-
-    # gt_bbox = [ 866.56, 589.8, 49.2, 106.64 ] #val0
-    # gt_bbox = [ 1135.75, 572.2, 193.79, 245.94 ] #val13
-    # gt_bbox = [ 1537.4388427734375, 620.4713745117188, 378.4976806640625, 185.96551513671875 ] #val309
-    gt_bbox = [ 204.69, 547.34, 88.02, 127.02 ]  #val586
-
-    # collect all query ids close to GT
-    q_ids, dists = find_query_ids_close_to_gt(
-        data,
-        image_path,
-        gt_bbox,
-        layer=-1,          # inspect last decoder layer
-        # margin_ratio=0.15, 
-        # dist_ratio=0.35,
-        margin_ratio=0,
-        dist_ratio=0,
-        topk=None          # or set e.g. 5
+    # impainted
+    # TARGET_QUERY_IDS = [
+    #     8, 13, 25, 32, 36, 42, 70, 77, 87, 120, 128, 156, 
+    #     158, 225, 241, 378, 432, 444, 474, 476, 482, 498, 
+    #     541, 565, 572, 607, 626, 630, 637, 680, 683, 695, 
+    #     709, 711, 771, 799, 816, 829, 835, 836, 837, 851, 883
+    # ]
+    print(
+        f"[INFO] Visualizing {len(TARGET_QUERY_IDS)} "
+        f"fixed target queries"
     )
 
-    print(f"[INFO] Found {len(q_ids)} queries close to GT: {q_ids}")
+    # --------------------------------------------------
+    # Plot + sampling visualization
+    # --------------------------------------------------
 
-    # plot for every selected query
-    for q_idx in q_ids:
-        q_dir = os.path.join(save_dir, f"query_{q_idx}")
+    for q_idx in TARGET_QUERY_IDS:
+
+        # skip invalid ids
+        if q_idx >= cls_scores.shape[1]:
+            print(f"[WARN] Invalid query id {q_idx}")
+            continue
+
+        q_dir = os.path.join(
+            save_dir,
+            f"query_{q_idx}"
+        )
+
         os.makedirs(q_dir, exist_ok=True)
 
-        plot_score_curve(cls_scores, q_idx, q_dir, class_names=RSUD_CLASSES)
-        overlay_sampling(data, image_path, q_idx, q_dir)
+        # ----------------------------------------------
+        # score curve across decoder layers
+        # ----------------------------------------------
 
-    # # 🔵 Score curve
-    # plot_score_curve(cls_scores, q_idx, save_dir, class_names=RSUD_CLASSES)
+        plot_score_curve(
+            cls_scores,
+            q_idx,
+            q_dir,
+            class_names=RSUD_CLASSES
+        )
 
-    # # 🔴 Sampling overlays
-    # overlay_sampling(data, image_path, q_idx, save_dir)
+        # ----------------------------------------------
+        # sampling shift visualization
+        # ----------------------------------------------
 
+        overlay_sampling(
+            data,
+            image_path,
+            q_idx,
+            q_dir
+        )
 
 # --------------------------------------------------
 # 🧪 Main
@@ -329,7 +370,7 @@ def main():
 
     parser.add_argument("--pt_dir", type=str, required=True)
     parser.add_argument("--image_name", type=str, required=True)
-    parser.add_argument("--output", type=str, default="rough_val5")
+    parser.add_argument("--output", type=str, default="rough")
 
     args = parser.parse_args()
 
