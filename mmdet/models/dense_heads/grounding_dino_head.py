@@ -326,12 +326,12 @@ class GroundingDINOHead(DINOHead):
 
         outs = self(hidden_states, references, memory_text, text_token_mask)
 
-        predictions, per_layer_cls_scores = self.predict_by_feat(
+        predictions, per_layer_cls_scores, per_layer_bbox_preds = self.predict_by_feat(
             *outs,
             batch_img_metas=batch_img_metas,
             batch_token_positive_maps=batch_token_positive_maps,
             rescale=rescale)
-        return predictions, per_layer_cls_scores
+        return predictions, per_layer_cls_scores, per_layer_bbox_preds
 
     # def predict_by_feat(self,
     #                     all_layers_cls_scores: Tensor,
@@ -396,6 +396,7 @@ class GroundingDINOHead(DINOHead):
 
         result_list = []
         per_layer_cls_scores_list = []
+        per_layer_bbox_preds_list = []
 
         for img_id in range(len(batch_img_metas)):
 
@@ -409,9 +410,11 @@ class GroundingDINOHead(DINOHead):
             )
 
             per_layer_cls_scores = []
+            per_layer_bbox_preds = []
 
             for l in range(num_layers):
                 cls_score_l = all_layers_cls_scores[l, img_id]
+                bbox_pred_l = all_layers_bbox_preds[l, img_id]   # [Q, 4]
 
                 if token_positive_maps is not None:
                     cls_score_l = convert_grounding_to_cls_scores(
@@ -422,10 +425,13 @@ class GroundingDINOHead(DINOHead):
                     cls_score_l = cls_score_l.sigmoid()
 
                 per_layer_cls_scores.append(cls_score_l.detach().cpu())
+                per_layer_bbox_preds.append(bbox_pred_l.detach().cpu())
 
             # ✅ IMPORTANT FIX
             per_layer_cls_scores = torch.stack(per_layer_cls_scores)  # [L, Q, C]
+            per_layer_bbox_preds = torch.stack(per_layer_bbox_preds)  # [L,Q,4]
             per_layer_cls_scores_list.append(per_layer_cls_scores)
+            per_layer_bbox_preds_list.append(per_layer_bbox_preds)
 
             results = self._predict_by_feat_single(
                 cls_score, bbox_pred,
@@ -436,8 +442,11 @@ class GroundingDINOHead(DINOHead):
 
         # ✅ Final stack
         per_layer_cls_scores_all = torch.stack(per_layer_cls_scores_list)  # [bs, L, Q, C]
+        per_layer_bbox_preds_all = torch.stack(per_layer_bbox_preds_list)
+        
 
-        return result_list, per_layer_cls_scores_all
+        return result_list, per_layer_cls_scores_all, per_layer_bbox_preds_all
+    
     def _predict_by_feat_single(self,
                                 cls_score: Tensor,
                                 bbox_pred: Tensor,
