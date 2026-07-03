@@ -222,6 +222,7 @@ class DINO(DeformableDETR):
                         level_start_index: Tensor,
                         valid_ratios: Tensor,
                         dn_mask: Optional[Tensor] = None,
+                        dn_meta: Dict[str, int] = None,
                         **kwargs) -> Dict:
         """Forward with Transformer decoder.
 
@@ -272,6 +273,8 @@ class DINO(DeformableDETR):
             level_start_index=level_start_index,
             valid_ratios=valid_ratios,
             reg_branches=self.bbox_head.reg_branches,
+            save_flag=True,
+            dn_meta = dn_meta,
             **kwargs)
 
         if len(query) == self.num_queries:

@@ -268,3 +268,7 @@ class GroundingDinoTransformerDecoder(DinoTransformerDecoder):
         self.ref_point_head = MLP(self.embed_dims * 2, self.embed_dims,
                                   self.embed_dims, 2)
         self.norm = nn.LayerNorm(self.embed_dims)
+        
+        self.all_sampling_locations = None
+        # self.all_attention_weights = None
+        self.all_reference_points = None

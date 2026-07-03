@@ -18,6 +18,7 @@ from mmdet.utils import InstanceList, reduce_mean
 from ..layers import inverse_sigmoid
 from .atss_vlfusion_head import convert_grounding_to_cls_scores
 from .dino_head import DINOHead
+from mmdet.structures.bbox import bbox_overlaps
 
 
 class ContrastiveEmbed(nn.Module):
@@ -99,9 +100,22 @@ class GroundingDINOHead(DINOHead):
           keys like ``max_text_len``. Defaults to dict(max_text_len=256).
     """
 
-    def __init__(self, contrastive_cfg=dict(max_text_len=256), **kwargs):
+    def __init__(self, contrastive_cfg=dict(max_text_len=256), 
+                 repulsion_margin=0.02,
+                 repulsion_loss_weight=1.0,
+                 beta_x=1.0,
+                 beta_y=1.0,
+                 exponent=1.0,
+                 sampling_loss_weight=1.0,
+                 **kwargs):
         self.contrastive_cfg = contrastive_cfg
         self.max_text_len = contrastive_cfg.get('max_text_len', 256)
+        self.repulsion_margin = repulsion_margin
+        self.repulsion_loss_weight = repulsion_loss_weight
+        self.beta_x = beta_x
+        self.beta_y = beta_y
+        self.exponent = exponent
+        self.sampling_loss_weight = sampling_loss_weight
         super().__init__(**kwargs)
 
     def _init_layers(self) -> None:
@@ -326,60 +340,126 @@ class GroundingDINOHead(DINOHead):
 
         outs = self(hidden_states, references, memory_text, text_token_mask)
 
-        predictions = self.predict_by_feat(
+        predictions, per_layer_cls_scores, per_layer_bbox_preds = self.predict_by_feat(
             *outs,
             batch_img_metas=batch_img_metas,
             batch_token_positive_maps=batch_token_positive_maps,
             rescale=rescale)
-        return predictions
+        return predictions, per_layer_cls_scores, per_layer_bbox_preds
+
+    # def predict_by_feat(self,
+    #                     all_layers_cls_scores: Tensor,
+    #                     all_layers_bbox_preds: Tensor,
+    #                     batch_img_metas: List[Dict],
+    #                     batch_token_positive_maps: Optional[List[dict]] = None,
+    #                     rescale: bool = False) -> InstanceList:
+    #     """Transform a batch of output features extracted from the head into
+    #     bbox results.
+
+    #     Args:
+    #         all_layers_cls_scores (Tensor):  Classification scores of all
+    #             decoder layers, has shape (num_decoder_layers, bs, num_queries,
+    #             cls_out_channels).
+    #         all_layers_bbox_preds (Tensor): Regression outputs of all decoder
+    #             layers. Each is a 4D-tensor with normalized coordinate format
+    #             (cx, cy, w, h) and shape (num_decoder_layers, bs, num_queries,
+    #             4) with the last dimension arranged as (cx, cy, w, h).
+    #         batch_img_metas (List[Dict]): _description_
+    #         batch_token_positive_maps (list[dict], Optional): Batch token
+    #             positive map. Defaults to None.
+    #         rescale (bool): If True, return boxes in original image space.
+    #             Defaults to False.
+
+    #     Returns:
+    #         list[:obj:`InstanceData`]: Object detection results of each image
+    #         after the post process. Each item usually contains following keys.
+
+    #             - scores (Tensor): Classification scores, has a shape
+    #               (num_instance, )
+    #             - labels (Tensor): Labels of bboxes, has a shape
+    #               (num_instances, ).
+    #             - bboxes (Tensor): Has a shape (num_instances, 4),
+    #               the last dimension 4 arrange as (x1, y1, x2, y2).
+    #     """
+    #     cls_scores = all_layers_cls_scores[-1]
+    #     bbox_preds = all_layers_bbox_preds[-1]
+    #     result_list = []
+    #     for img_id in range(len(batch_img_metas)):
+    #         cls_score = cls_scores[img_id]
+    #         bbox_pred = bbox_preds[img_id]
+    #         img_meta = batch_img_metas[img_id]
+    #         token_positive_maps = batch_token_positive_maps[img_id]
+    #         results = self._predict_by_feat_single(cls_score, bbox_pred,
+    #                                                token_positive_maps,
+    #                                                img_meta, rescale)
+    #         result_list.append(results)
+    #     return result_list
 
     def predict_by_feat(self,
-                        all_layers_cls_scores: Tensor,
-                        all_layers_bbox_preds: Tensor,
-                        batch_img_metas: List[Dict],
-                        batch_token_positive_maps: Optional[List[dict]] = None,
-                        rescale: bool = False) -> InstanceList:
-        """Transform a batch of output features extracted from the head into
-        bbox results.
+                    all_layers_cls_scores: Tensor,
+                    all_layers_bbox_preds: Tensor,
+                    batch_img_metas: List[Dict],
+                    batch_token_positive_maps: Optional[List[dict]] = None,
+                    rescale: bool = False) -> InstanceList:
 
-        Args:
-            all_layers_cls_scores (Tensor):  Classification scores of all
-                decoder layers, has shape (num_decoder_layers, bs, num_queries,
-                cls_out_channels).
-            all_layers_bbox_preds (Tensor): Regression outputs of all decoder
-                layers. Each is a 4D-tensor with normalized coordinate format
-                (cx, cy, w, h) and shape (num_decoder_layers, bs, num_queries,
-                4) with the last dimension arranged as (cx, cy, w, h).
-            batch_img_metas (List[Dict]): _description_
-            batch_token_positive_maps (list[dict], Optional): Batch token
-                positive map. Defaults to None.
-            rescale (bool): If True, return boxes in original image space.
-                Defaults to False.
+        num_layers = all_layers_cls_scores.shape[0]
 
-        Returns:
-            list[:obj:`InstanceData`]: Object detection results of each image
-            after the post process. Each item usually contains following keys.
-
-                - scores (Tensor): Classification scores, has a shape
-                  (num_instance, )
-                - labels (Tensor): Labels of bboxes, has a shape
-                  (num_instances, ).
-                - bboxes (Tensor): Has a shape (num_instances, 4),
-                  the last dimension 4 arrange as (x1, y1, x2, y2).
-        """
+        # final layer for actual prediction (UNCHANGED)
         cls_scores = all_layers_cls_scores[-1]
         bbox_preds = all_layers_bbox_preds[-1]
+
         result_list = []
+        per_layer_cls_scores_list = []
+        per_layer_bbox_preds_list = []
+
         for img_id in range(len(batch_img_metas)):
+
             cls_score = cls_scores[img_id]
             bbox_pred = bbox_preds[img_id]
             img_meta = batch_img_metas[img_id]
-            token_positive_maps = batch_token_positive_maps[img_id]
-            results = self._predict_by_feat_single(cls_score, bbox_pred,
-                                                   token_positive_maps,
-                                                   img_meta, rescale)
+
+            token_positive_maps = (
+                batch_token_positive_maps[img_id]
+                if batch_token_positive_maps is not None else None
+            )
+
+            per_layer_cls_scores = []
+            per_layer_bbox_preds = []
+
+            for l in range(num_layers):
+                cls_score_l = all_layers_cls_scores[l, img_id]
+                bbox_pred_l = all_layers_bbox_preds[l, img_id]   # [Q, 4]
+
+                if token_positive_maps is not None:
+                    cls_score_l = convert_grounding_to_cls_scores(
+                        logits=cls_score_l.sigmoid()[None],
+                        positive_maps=[token_positive_maps]
+                    )[0]
+                else:
+                    cls_score_l = cls_score_l.sigmoid()
+
+                per_layer_cls_scores.append(cls_score_l.detach().cpu())
+                per_layer_bbox_preds.append(bbox_pred_l.detach().cpu())
+
+            # ✅ IMPORTANT FIX
+            per_layer_cls_scores = torch.stack(per_layer_cls_scores)  # [L, Q, C]
+            per_layer_bbox_preds = torch.stack(per_layer_bbox_preds)  # [L,Q,4]
+            per_layer_cls_scores_list.append(per_layer_cls_scores)
+            per_layer_bbox_preds_list.append(per_layer_bbox_preds)
+
+            results = self._predict_by_feat_single(
+                cls_score, bbox_pred,
+                token_positive_maps,
+                img_meta, rescale
+            )
             result_list.append(results)
-        return result_list
+
+        # ✅ Final stack
+        per_layer_cls_scores_all = torch.stack(per_layer_cls_scores_list)  # [bs, L, Q, C]
+        per_layer_bbox_preds_all = torch.stack(per_layer_bbox_preds_list)
+        
+
+        return result_list, per_layer_cls_scores_all, per_layer_bbox_preds_all
 
     def _predict_by_feat_single(self,
                                 cls_score: Tensor,
@@ -448,10 +528,252 @@ class GroundingDINOHead(DINOHead):
         results.labels = det_labels
         return results
 
+    # def compute_repulsion_loss(
+    #     self,
+    #     layer_sampling_locs,
+    #     layer_cls_scores,
+    #     layer_bbox_preds,
+    #     batch_gt_instances,
+    #     batch_img_metas,
+    #     overlap_thresh=0.2,
+    # ):
+    #     """
+    #     layer_sampling_locs:
+    #         [bs, Q, H, L, P, 2]
+
+    #     layer_cls_scores:
+    #         [bs, Q, C]
+
+    #     layer_bbox_preds:
+    #         [bs, Q, 4]
+    #     """
+
+    #     device = layer_sampling_locs.device
+
+    #     total_loss = layer_sampling_locs.new_tensor(0.0)
+    #     pair_count = 0
+
+    #     bs = layer_sampling_locs.size(0)
+
+    #     for img_id in range(bs):
+
+    #         gt_boxes = batch_gt_instances[img_id].bboxes
+
+    #         if len(gt_boxes) < 2:
+    #             continue
+
+    #         img_h, img_w = batch_img_metas[img_id]["img_shape"]
+
+    #         # --------------------------------------------------
+    #         # Hungarian assignment
+    #         # --------------------------------------------------
+    #         pred_instances = InstanceData(
+    #             scores=layer_cls_scores[img_id].detach(),
+    #             bboxes=bbox_cxcywh_to_xyxy(
+    #                 layer_bbox_preds[img_id].detach()
+    #             ) * layer_bbox_preds.new_tensor(
+    #                 [img_w, img_h, img_w, img_h]
+    #             )
+    #         )
+
+    #         assign_result = self.assigner.assign(
+    #             pred_instances=pred_instances,
+    #             gt_instances=batch_gt_instances[img_id],
+    #             img_meta=batch_img_metas[img_id]
+    #         )
+
+    #         assigned_gt = assign_result.gt_inds - 1
+
+    #         matched_queries = torch.where(
+    #             assigned_gt >= 0
+    #         )[0]
+
+    #         if len(matched_queries) < 2:
+    #             continue
+
+    #         # --------------------------------------------------
+    #         # query confidence
+    #         # --------------------------------------------------
+    #         query_conf = (
+    #             layer_cls_scores[img_id]
+    #             .sigmoid()
+    #             .max(dim=-1)
+    #             .values
+    #         )
+
+    #         # --------------------------------------------------
+    #         # GT IoU matrix
+    #         # --------------------------------------------------
+    #         gt_iou = bbox_overlaps(
+    #             gt_boxes,
+    #             gt_boxes
+    #         )
+
+    #         # --------------------------------------------------
+    #         # query pairs
+    #         # --------------------------------------------------
+    #         for i in range(len(matched_queries)):
+
+    #             q1 = matched_queries[i]
+
+    #             for j in range(i + 1, len(matched_queries)):
+
+    #                 q2 = matched_queries[j]
+
+    #                 gt1 = assigned_gt[q1]
+    #                 gt2 = assigned_gt[q2]
+
+    #                 if gt1 == gt2:
+    #                     continue
+
+    #                 if gt_iou[gt1, gt2] < overlap_thresh:
+    #                     continue
+
+    #                 # ----------------------------------------
+    #                 # dominant vs suppressed
+    #                 # ----------------------------------------
+    #                 if query_conf[q1] - query_conf[q2] > 0.1:
+    #                     dominant = q1
+    #                     suppressed = q2
+    #                 elif query_conf[q2] - query_conf[q1] > 0.1:
+    #                     dominant = q2
+    #                     suppressed = q1
+    #                 else:
+    #                     continue
+
+    #                 sup_pts = layer_sampling_locs[img_id,suppressed].reshape(-1, 2)
+
+    #                 dom_pts = layer_sampling_locs[img_id,dominant].reshape(-1,2)
+    #                 dom_pts = dom_pts.detach()
+
+    #                 dist = torch.cdist(sup_pts, dom_pts,p=2)
+
+    #                 nearest_dist = dist.min(dim=1).values
+
+    #                 chamfer_repulsion = torch.relu(
+    #                     self.repulsion_margin - nearest_dist
+    #                 ).mean()
+
+    #                 # Move the suppressed query's sampling pattern away from 
+    #                 # the dominant query's sampling pattern, while keeping the dominant query fixed
+    #                 pair_loss = chamfer_repulsion
+
+    #                 total_loss = total_loss + pair_loss
+    #                 pair_count += 1
+                    
+
+    #     if pair_count == 0:
+    #         return layer_sampling_locs.sum() * 0.0
+
+    #     return total_loss / pair_count
+
+
+    def compute_linear_box_sampling_loss(self, sampling_locations, reference_points):
+        """
+        Computes spatial penalty locally in the head using injected hyperparameters.
+        """
+        ref = reference_points.unsqueeze(2).unsqueeze(4)
+        
+        cx, cy = ref[..., 0], ref[..., 1]
+        w, h   = ref[..., 2], ref[..., 3]
+        
+        x, y = sampling_locations[..., 0], sampling_locations[..., 1]
+        
+        dx = torch.abs(x - cx)
+        dy = torch.abs(y - cy)
+        
+        loss_x_norm = torch.relu(dx - w / 2.0)
+        loss_y_norm = torch.relu(dy - h / 2.0)
+        
+        # Apply the polynomial exponent
+        loss_x_norm = loss_x_norm ** self.exponent
+        loss_y_norm = loss_y_norm ** self.exponent
+        
+        # Multiply by beta_y aspect ratio correction dynamically
+        # beta_y_corrected = self.beta_y * (1080.0 / 1920.0)
+        beta_y_corrected = self.beta_y * (1024.0/ 2048.0)
+        
+        loss = (self.beta_x * loss_x_norm) + (beta_y_corrected * loss_y_norm)
+        
+        return loss.mean()
+    
+    def compute_repulsion_loss(
+        self,
+        layer_sampling_locs,
+        layer_cls_scores,
+        layer_bbox_preds,
+        batch_gt_instances,
+        batch_img_metas,
+    ):
+        """
+        layer_sampling_locs: [bs, Q, H, L, P, 2]
+        layer_cls_scores:    [bs, Q, C]
+        layer_bbox_preds:    [bs, Q, 4]
+        """
+        bs = layer_sampling_locs.size(0)
+        total_rep_loss = layer_sampling_locs.new_tensor(0.0)
+        rep_pair_count = 0
+
+        for img_id in range(bs):
+            gt_boxes = batch_gt_instances[img_id].bboxes
+
+            if len(gt_boxes) < 2:
+                continue
+
+            img_h, img_w = batch_img_metas[img_id]["img_shape"]
+
+            # Hungarian assignment
+            pred_instances = InstanceData(
+                scores=layer_cls_scores[img_id].detach(),
+                bboxes=bbox_cxcywh_to_xyxy(layer_bbox_preds[img_id].detach()) * layer_bbox_preds.new_tensor([img_w, img_h, img_w, img_h])
+            )
+
+            assign_result = self.assigner.assign(
+                pred_instances=pred_instances,
+                gt_instances=batch_gt_instances[img_id],
+                img_meta=batch_img_metas[img_id]
+            )
+
+            assigned_gt = assign_result.gt_inds - 1
+            matched_queries = torch.where(assigned_gt >= 0)[0]
+
+            if len(matched_queries) < 2:
+                continue
+
+            # Symmetric Repulsion Logic
+            for i in range(len(matched_queries)):
+                q1 = matched_queries[i]
+                
+                for j in range(i + 1, len(matched_queries)):
+                    q2 = matched_queries[j]
+
+                    pts1 = layer_sampling_locs[img_id, q1].reshape(-1, 2)
+                    pts2 = layer_sampling_locs[img_id, q2].reshape(-1, 2)
+
+                    # q1 pushes away from q2
+                    dist12 = torch.cdist(pts1, pts2.detach(), p=2)
+                    rep1 = torch.relu(self.repulsion_margin - dist12.min(dim=1).values).mean()
+
+                    # q2 pushes away from q1
+                    dist21 = torch.cdist(pts2, pts1.detach(), p=2)
+                    rep2 = torch.relu(self.repulsion_margin - dist21.min(dim=1).values).mean()
+
+                    # Average the push and apply lambda
+                    pair_loss = (rep1 + rep2) / 2.0
+                    
+                    total_rep_loss += pair_loss
+                    rep_pair_count += 1
+
+        if rep_pair_count == 0:
+            return layer_sampling_locs.sum() * 0.0
+
+        return total_rep_loss / rep_pair_count
+
+    
     def loss(self, hidden_states: Tensor, references: List[Tensor],
-             memory_text: Tensor, text_token_mask: Tensor,
-             enc_outputs_class: Tensor, enc_outputs_coord: Tensor,
-             batch_data_samples: SampleList, dn_meta: Dict[str, int]) -> dict:
+                memory_text: Tensor, text_token_mask: Tensor,
+                enc_outputs_class: Tensor, enc_outputs_coord: Tensor,
+                batch_data_samples: SampleList, dn_meta: Dict[str, int], sampling_locations: Tensor=None, reference_points: Tensor=None) -> dict:
         """Perform forward propagation and loss calculation of the detection
         head on the queries of the upstream network.
 
@@ -479,9 +801,9 @@ class GroundingDINOHead(DINOHead):
                 Samples. It usually includes information such as
                 `gt_instance`, `gt_panoptic_seg` and `gt_sem_seg`.
             dn_meta (Dict[str, int]): The dictionary saves information about
-              group collation, including 'num_denoising_queries' and
-              'num_denoising_groups'. It will be used for split outputs of
-              denoising and matching parts and loss calculation.
+            group collation, including 'num_denoising_queries' and
+            'num_denoising_groups'. It will be used for split outputs of
+            denoising and matching parts and loss calculation.
 
         Returns:
             dict: A dictionary of loss components.
@@ -495,10 +817,45 @@ class GroundingDINOHead(DINOHead):
         outs = self(hidden_states, references, memory_text, text_token_mask)
         self.text_masks = text_token_mask
         loss_inputs = outs + (enc_outputs_class, enc_outputs_coord,
-                              batch_gt_instances, batch_img_metas, dn_meta)
+                            batch_gt_instances, batch_img_metas, dn_meta)
         losses = self.loss_by_feat(*loss_inputs)
+        
+        num_dn_queries = dn_meta['num_denoising_queries'] if dn_meta else 0
+
+        if sampling_locations is not None:
+            repulsion_losses = []
+            sampling_losses = []
+            num_layers = len(sampling_locations)
+
+            for layer_idx in range(num_layers):
+
+                s_loss = self.compute_linear_box_sampling_loss(
+                    sampling_locations[layer_idx][:, num_dn_queries:],
+                    reference_points[layer_idx][:, num_dn_queries:]
+                )
+                sampling_losses.append(s_loss)
+
+                
+            losses['loss_sampling'] = self.sampling_loss_weight * sampling_losses[-1]  
+            
+            for i in range(len(sampling_losses) - 1):
+                losses[f'd{i}.loss_sampling'] = (self.sampling_loss_weight * sampling_losses[i])
+  
         return losses
 
+
+    # r_loss = self.compute_repulsion_loss(
+                #     sampling_locations[layer_idx][:, num_dn_queries:],
+                #     outs[0][layer_idx][:, num_dn_queries:],   # cls scores
+                #     outs[1][layer_idx][:, num_dn_queries:],   # bbox preds
+                #     batch_gt_instances,
+                #     batch_img_metas
+                # )
+                # repulsion_losses.append(r_loss)
+            
+            # losses["loss_repulsion"] = self.repulsion_loss_weight * repulsion_losses[-1]
+
+    # losses[f"d{i}.loss_repulsion"] = (self.repulsion_loss_weight * repulsion_losses[i])
     def loss_by_feat_single(self, cls_scores: Tensor, bbox_preds: Tensor,
                             batch_gt_instances: InstanceList,
                             batch_img_metas: List[dict]) -> Tuple[Tensor]:

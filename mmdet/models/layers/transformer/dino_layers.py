@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import warnings
-from typing import Tuple, Union
+from typing import Tuple, Union, Dict
 
 import torch
 from mmengine.model import BaseModule
@@ -27,6 +27,8 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 self_attn_mask: Tensor, reference_points: Tensor,
                 spatial_shapes: Tensor, level_start_index: Tensor,
                 valid_ratios: Tensor, reg_branches: nn.ModuleList,
+                save_flag: bool,
+                dn_meta: Dict[str, int],
                 **kwargs) -> Tuple[Tensor]:
         """Forward function of Transformer decoder.
 
@@ -70,6 +72,12 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
         """
         intermediate = []
         intermediate_reference_points = [reference_points]
+        
+        if (save_flag):
+            self.all_sampling_locations = []
+            # self.all_attention_weights = []
+            self.all_reference_points = []
+
         for lid, layer in enumerate(self.layers):
             if reference_points.shape[-1] == 4:
                 reference_points_input = \
@@ -84,6 +92,11 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 reference_points_input[:, :, 0, :])
             query_pos = self.ref_point_head(query_sine_embed)
 
+            if dn_meta is not None and isinstance(dn_meta, dict):
+                num_dn = dn_meta.get('num_denoising_queries', 0)
+            else:
+                num_dn = 0
+
             query = layer(
                 query,
                 query_pos=query_pos,
@@ -94,8 +107,15 @@ class DinoTransformerDecoder(DeformableDetrTransformerDecoder):
                 level_start_index=level_start_index,
                 valid_ratios=valid_ratios,
                 reference_points=reference_points_input,
+                save_flag = save_flag,
+                num_dn_queries = num_dn,
                 **kwargs)
 
+            if save_flag :
+                self.all_sampling_locations.append(layer.cross_attn.sampling_locations)
+                # self.all_attention_weights.append(layer.cross_attn.attention_weights_)
+                self.all_reference_points.append(layer.cross_attn.reference_points_)
+                
             if reg_branches is not None:
                 tmp = reg_branches[lid](query)
                 assert reference_points.shape[-1] == 4
