@@ -528,252 +528,12 @@ class GroundingDINOHead(DINOHead):
         results.labels = det_labels
         return results
 
-    # def compute_repulsion_loss(
-    #     self,
-    #     layer_sampling_locs,
-    #     layer_cls_scores,
-    #     layer_bbox_preds,
-    #     batch_gt_instances,
-    #     batch_img_metas,
-    #     overlap_thresh=0.2,
-    # ):
-    #     """
-    #     layer_sampling_locs:
-    #         [bs, Q, H, L, P, 2]
-
-    #     layer_cls_scores:
-    #         [bs, Q, C]
-
-    #     layer_bbox_preds:
-    #         [bs, Q, 4]
-    #     """
-
-    #     device = layer_sampling_locs.device
-
-    #     total_loss = layer_sampling_locs.new_tensor(0.0)
-    #     pair_count = 0
-
-    #     bs = layer_sampling_locs.size(0)
-
-    #     for img_id in range(bs):
-
-    #         gt_boxes = batch_gt_instances[img_id].bboxes
-
-    #         if len(gt_boxes) < 2:
-    #             continue
-
-    #         img_h, img_w = batch_img_metas[img_id]["img_shape"]
-
-    #         # --------------------------------------------------
-    #         # Hungarian assignment
-    #         # --------------------------------------------------
-    #         pred_instances = InstanceData(
-    #             scores=layer_cls_scores[img_id].detach(),
-    #             bboxes=bbox_cxcywh_to_xyxy(
-    #                 layer_bbox_preds[img_id].detach()
-    #             ) * layer_bbox_preds.new_tensor(
-    #                 [img_w, img_h, img_w, img_h]
-    #             )
-    #         )
-
-    #         assign_result = self.assigner.assign(
-    #             pred_instances=pred_instances,
-    #             gt_instances=batch_gt_instances[img_id],
-    #             img_meta=batch_img_metas[img_id]
-    #         )
-
-    #         assigned_gt = assign_result.gt_inds - 1
-
-    #         matched_queries = torch.where(
-    #             assigned_gt >= 0
-    #         )[0]
-
-    #         if len(matched_queries) < 2:
-    #             continue
-
-    #         # --------------------------------------------------
-    #         # query confidence
-    #         # --------------------------------------------------
-    #         query_conf = (
-    #             layer_cls_scores[img_id]
-    #             .sigmoid()
-    #             .max(dim=-1)
-    #             .values
-    #         )
-
-    #         # --------------------------------------------------
-    #         # GT IoU matrix
-    #         # --------------------------------------------------
-    #         gt_iou = bbox_overlaps(
-    #             gt_boxes,
-    #             gt_boxes
-    #         )
-
-    #         # --------------------------------------------------
-    #         # query pairs
-    #         # --------------------------------------------------
-    #         for i in range(len(matched_queries)):
-
-    #             q1 = matched_queries[i]
-
-    #             for j in range(i + 1, len(matched_queries)):
-
-    #                 q2 = matched_queries[j]
-
-    #                 gt1 = assigned_gt[q1]
-    #                 gt2 = assigned_gt[q2]
-
-    #                 if gt1 == gt2:
-    #                     continue
-
-    #                 if gt_iou[gt1, gt2] < overlap_thresh:
-    #                     continue
-
-    #                 # ----------------------------------------
-    #                 # dominant vs suppressed
-    #                 # ----------------------------------------
-    #                 if query_conf[q1] - query_conf[q2] > 0.1:
-    #                     dominant = q1
-    #                     suppressed = q2
-    #                 elif query_conf[q2] - query_conf[q1] > 0.1:
-    #                     dominant = q2
-    #                     suppressed = q1
-    #                 else:
-    #                     continue
-
-    #                 sup_pts = layer_sampling_locs[img_id,suppressed].reshape(-1, 2)
-
-    #                 dom_pts = layer_sampling_locs[img_id,dominant].reshape(-1,2)
-    #                 dom_pts = dom_pts.detach()
-
-    #                 dist = torch.cdist(sup_pts, dom_pts,p=2)
-
-    #                 nearest_dist = dist.min(dim=1).values
-
-    #                 chamfer_repulsion = torch.relu(
-    #                     self.repulsion_margin - nearest_dist
-    #                 ).mean()
-
-    #                 # Move the suppressed query's sampling pattern away from 
-    #                 # the dominant query's sampling pattern, while keeping the dominant query fixed
-    #                 pair_loss = chamfer_repulsion
-
-    #                 total_loss = total_loss + pair_loss
-    #                 pair_count += 1
-                    
-
-    #     if pair_count == 0:
-    #         return layer_sampling_locs.sum() * 0.0
-
-    #     return total_loss / pair_count
-
-
-    def compute_linear_box_sampling_loss(self, sampling_locations, reference_points):
-        """
-        Computes spatial penalty locally in the head using injected hyperparameters.
-        """
-        ref = reference_points.unsqueeze(2).unsqueeze(4)
-        
-        cx, cy = ref[..., 0], ref[..., 1]
-        w, h   = ref[..., 2], ref[..., 3]
-        
-        x, y = sampling_locations[..., 0], sampling_locations[..., 1]
-        
-        dx = torch.abs(x - cx)
-        dy = torch.abs(y - cy)
-        
-        loss_x_norm = torch.relu(dx - w / 2.0)
-        loss_y_norm = torch.relu(dy - h / 2.0)
-        
-        # Apply the polynomial exponent
-        loss_x_norm = loss_x_norm ** self.exponent
-        loss_y_norm = loss_y_norm ** self.exponent
-        
-        # Multiply by beta_y aspect ratio correction dynamically
-        # beta_y_corrected = self.beta_y * (1080.0 / 1920.0)
-        beta_y_corrected = self.beta_y * (1024.0/ 2048.0)
-        
-        loss = (self.beta_x * loss_x_norm) + (beta_y_corrected * loss_y_norm)
-        
-        return loss.mean()
-    
-    def compute_repulsion_loss(
-        self,
-        layer_sampling_locs,
-        layer_cls_scores,
-        layer_bbox_preds,
-        batch_gt_instances,
-        batch_img_metas,
-    ):
-        """
-        layer_sampling_locs: [bs, Q, H, L, P, 2]
-        layer_cls_scores:    [bs, Q, C]
-        layer_bbox_preds:    [bs, Q, 4]
-        """
-        bs = layer_sampling_locs.size(0)
-        total_rep_loss = layer_sampling_locs.new_tensor(0.0)
-        rep_pair_count = 0
-
-        for img_id in range(bs):
-            gt_boxes = batch_gt_instances[img_id].bboxes
-
-            if len(gt_boxes) < 2:
-                continue
-
-            img_h, img_w = batch_img_metas[img_id]["img_shape"]
-
-            # Hungarian assignment
-            pred_instances = InstanceData(
-                scores=layer_cls_scores[img_id].detach(),
-                bboxes=bbox_cxcywh_to_xyxy(layer_bbox_preds[img_id].detach()) * layer_bbox_preds.new_tensor([img_w, img_h, img_w, img_h])
-            )
-
-            assign_result = self.assigner.assign(
-                pred_instances=pred_instances,
-                gt_instances=batch_gt_instances[img_id],
-                img_meta=batch_img_metas[img_id]
-            )
-
-            assigned_gt = assign_result.gt_inds - 1
-            matched_queries = torch.where(assigned_gt >= 0)[0]
-
-            if len(matched_queries) < 2:
-                continue
-
-            # Symmetric Repulsion Logic
-            for i in range(len(matched_queries)):
-                q1 = matched_queries[i]
-                
-                for j in range(i + 1, len(matched_queries)):
-                    q2 = matched_queries[j]
-
-                    pts1 = layer_sampling_locs[img_id, q1].reshape(-1, 2)
-                    pts2 = layer_sampling_locs[img_id, q2].reshape(-1, 2)
-
-                    # q1 pushes away from q2
-                    dist12 = torch.cdist(pts1, pts2.detach(), p=2)
-                    rep1 = torch.relu(self.repulsion_margin - dist12.min(dim=1).values).mean()
-
-                    # q2 pushes away from q1
-                    dist21 = torch.cdist(pts2, pts1.detach(), p=2)
-                    rep2 = torch.relu(self.repulsion_margin - dist21.min(dim=1).values).mean()
-
-                    # Average the push and apply lambda
-                    pair_loss = (rep1 + rep2) / 2.0
-                    
-                    total_rep_loss += pair_loss
-                    rep_pair_count += 1
-
-        if rep_pair_count == 0:
-            return layer_sampling_locs.sum() * 0.0
-
-        return total_rep_loss / rep_pair_count
-
-    
     def loss(self, hidden_states: Tensor, references: List[Tensor],
-                memory_text: Tensor, text_token_mask: Tensor,
-                enc_outputs_class: Tensor, enc_outputs_coord: Tensor,
-                batch_data_samples: SampleList, dn_meta: Dict[str, int], sampling_locations: Tensor=None, reference_points: Tensor=None) -> dict:
+             memory_text: Tensor, text_token_mask: Tensor,
+             enc_outputs_class: Tensor, enc_outputs_coord: Tensor,
+             batch_data_samples: SampleList, dn_meta: Dict[str, int], 
+             sampling_locations: Tensor=None, 
+             reference_points: Tensor=None) -> dict:
         """Perform forward propagation and loss calculation of the detection
         head on the queries of the upstream network.
 
@@ -801,9 +561,9 @@ class GroundingDINOHead(DINOHead):
                 Samples. It usually includes information such as
                 `gt_instance`, `gt_panoptic_seg` and `gt_sem_seg`.
             dn_meta (Dict[str, int]): The dictionary saves information about
-            group collation, including 'num_denoising_queries' and
-            'num_denoising_groups'. It will be used for split outputs of
-            denoising and matching parts and loss calculation.
+              group collation, including 'num_denoising_queries' and
+              'num_denoising_groups'. It will be used for split outputs of
+              denoising and matching parts and loss calculation.
 
         Returns:
             dict: A dictionary of loss components.
@@ -817,46 +577,11 @@ class GroundingDINOHead(DINOHead):
         outs = self(hidden_states, references, memory_text, text_token_mask)
         self.text_masks = text_token_mask
         loss_inputs = outs + (enc_outputs_class, enc_outputs_coord,
-                            batch_gt_instances, batch_img_metas, dn_meta)
+                              batch_gt_instances, batch_img_metas, dn_meta)
         losses = self.loss_by_feat(*loss_inputs)
-        
-        num_dn_queries = dn_meta['num_denoising_queries'] if dn_meta else 0
-
-        if sampling_locations is not None:
-            repulsion_losses = []
-            sampling_losses = []
-            num_layers = len(sampling_locations)
-
-            for layer_idx in range(num_layers):
-
-                s_loss = self.compute_linear_box_sampling_loss(
-                    sampling_locations[layer_idx][:, num_dn_queries:],
-                    reference_points[layer_idx][:, num_dn_queries:]
-                )
-                sampling_losses.append(s_loss)
-
-                
-            losses['loss_sampling'] = self.sampling_loss_weight * sampling_losses[-1]  
-            
-            for i in range(len(sampling_losses) - 1):
-                losses[f'd{i}.loss_sampling'] = (self.sampling_loss_weight * sampling_losses[i])
-  
         return losses
 
-
-    # r_loss = self.compute_repulsion_loss(
-                #     sampling_locations[layer_idx][:, num_dn_queries:],
-                #     outs[0][layer_idx][:, num_dn_queries:],   # cls scores
-                #     outs[1][layer_idx][:, num_dn_queries:],   # bbox preds
-                #     batch_gt_instances,
-                #     batch_img_metas
-                # )
-                # repulsion_losses.append(r_loss)
-            
-            # losses["loss_repulsion"] = self.repulsion_loss_weight * repulsion_losses[-1]
-
-    # losses[f"d{i}.loss_repulsion"] = (self.repulsion_loss_weight * repulsion_losses[i])
-    def loss_by_feat_single(self, cls_scores: Tensor, bbox_preds: Tensor,
+       def loss_by_feat_single(self, cls_scores: Tensor, bbox_preds: Tensor,
                             batch_gt_instances: InstanceList,
                             batch_img_metas: List[dict]) -> Tuple[Tensor]:
         """Loss function for outputs from a single decoder layer of a single
